@@ -232,7 +232,7 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 | tla-smoke | yes | Blocking 3-model smoke (`SGL`, `NOrec-smoke`, `TinySTM_WBCTL`), 60 s/model budget |
 | lint | yes | `clang-format-22`, `cargo fmt --check`, `clippy -D warnings` |
 | sanitizer | yes | ASan build + run of `bank`, `test_tx`, `test_ds` over NOREC/TL2 |
-| tsan-gate | yes | `-fsanitize=thread` build + `drv_diff_ops` over the 18 backends that are race-clean (CSMV also in `CSMV_SERVER_COMMIT=1` mode); a new race or consistency violation fails the PR |
+| tsan-gate | yes | `-fsanitize=thread` build + `drv_diff_ops` over all 19 C++ backends, each of which is race-clean (CSMV also in `CSMV_SERVER_COMMIT=1` mode; ACCELTL2 with `TM_ACCEL_DISABLE=1`, since its device path's only reports come from the OpenCL driver); a new race or consistency violation fails the PR |
 | md-links | yes | Relative Markdown link integrity |
 | plugin-benchmarks-build | yes | Build the plugin-instrumented benchmark binaries |
 | header-compiles | yes | Compile every public header standalone (catches include-order breakage) |
@@ -240,7 +240,7 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 | fuzz-smoke | yes | Short fuzz-target smoke run |
 
 
-### `.github/workflows/nightly.yml` (9 jobs, cron)
+### `.github/workflows/nightly.yml` (10 jobs, cron)
 
 | Job | Cadence | What it does |
 |-----|---------|-------------|
@@ -253,3 +253,4 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 | gpu-compile-check | weekly | Compile GPU benchmarks on self-hosted runner; skips when no `nvcc`/`hipcc` |
 | htm-workloads-compile | weekly | Build `gem5_sim/workloads/rtm` (host `-mrtm`) and `gem5_sim/workloads/tme` (`-march=armv8.1-a+tme` via `gcc-aarch64-linux-gnu`) — the only check those bare-metal HTM programs get |
 | cpp-coverage | weekly | `llvm-cov` line report for the region allocator, common runtime and a representative backend (non-blocking) |
+| accel-e2e | weekly | Builds ACCELTL2 and runs it with device prevalidation forced on for every commit; asserts the oracle counters and money conservation always, and that a present fine-grain-SVM device really was used (so an accelerator-free runner cannot report the device path as tested) |

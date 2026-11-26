@@ -3472,3 +3472,51 @@ LLVM 22 — verified: no `tme` in its AArch64 feature list, `__ARM_FEATURE_TME`
 never defined), and a non-blocking `htm-workloads-compile` nightly job builds the
 RTM and TME workloads so they cannot rot again. An end-to-end ARM run still needs
 an ARM/ALL gem5 build, which this repo does not produce.
+
+## Session 2026-11-26 (late night) — sanitizer sweep finished; ACCELTL2 phase-switch teardown fix (§32)
+
+Continued from the earlier entry the same night; everything below is on top of
+`cf7ff56`.
+
+**Sweep closed out.** ThreadSanitizer over `drv_diff_ops -S 1 -T 4 -n 200` now
+reports **0** warnings on every backend it gates (down from 178 tree-wide), and
+`tools/diff_backends.sh` passes for all 21 backends. `ci.yml`'s `tsan-gate`
+covers all 19 C++ backends, with ACCELTL2 on its CPU path and CSMV additionally
+in `CSMV_SERVER_COMMIT=1` mode.
+
+**§32 — a real crash behind the noise.** ACCELTL2's remaining sanitizer reports
+are all inside the AMD OpenCL ICD (`libamdocl64.so`) and its HSA runtime: they
+name none of our sources and reproduce with `-T 1`, where the STM layer has no
+threads of its own. Chasing them onto a host that actually has a fine-grain-SVM
+device (`gfx1151`) exposed the real defect: `do_tm_exit()` called
+`accel::shutdown()`, which releases the SVM block holding TL2's guard table,
+while `tl2::STM::g_guards` still pointed at it and `STM::initialized` stayed
+true — so the next `tm_init()` phase segfaulted inside `commit()`, and because
+`shutdown()` also cleared `available` the accelerator could never be re-acquired
+in that process. Fixed by teardown ordering (new `tl2::STM::accel_teardown()`
+moves the table back to the static CPU backing store first), re-acquisition in
+`init()`, keeping `available` across `shutdown()` and releasing SVM blocks only
+after `clFinish` under the dispatch lock, and making the module's published
+state (`available`, `probed`, `guards_svm`, statistics) atomic. A failed
+`clSVMAlloc` no longer disarms the accelerator for the whole process.
+
+**New pin + coverage.** `tests/concurrency/repro_accel_teardown.cpp` re-inits the
+STM mid-process and uses the device dispatch counter to prove each phase really
+used the shared guard table (SIGSEGV before the fix; `phase-1=64 phase-2=64`,
+PASS after); `tools/diff_backends.sh` runs it for every backend and it SKIPs
+where no such device exists. `tests/concurrency/tsan-suppressions-opencl.txt`
+documents the ICD noise (12 → 2, both driver-internal). `nightly.yml` gains an
+`accel-e2e` job that forces prevalidation on every commit, checks the driver's
+oracle counters and `bank` conservation, and — when a fine-grain-SVM device is
+present — that work actually reached it, so an accelerator-free runner cannot
+report the device path as tested.
+
+**Docs.** `docs/CORRECTNESS_FIXES.md` §32 and its known-issues table;
+`docs/DEBUGGING_BACKENDS.md` gained the ThreadSanitizer recipe (why
+`external_symbolizer_path=` is required with LLVM 22, how to resolve frames and
+data addresses offline, why a sweep must snapshot the binary per backend, and
+that a `mersenne_twister_engine` "race" means mis-symbolization);
+`docs/DEVELOPER_GUIDE.md`'s CI tables were a stale 10 of 17 jobs and are
+reconciled, plus the new nightly rows; `backends/tm_impl/accel_tl2/STATUS.md`
+records the end-to-end device validation and the measured ~39× cost of forcing
+prevalidation on every commit (why the default threshold is 4096 entries).

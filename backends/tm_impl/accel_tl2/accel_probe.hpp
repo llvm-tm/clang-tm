@@ -53,6 +53,12 @@ uint64_t min_entries();
 // seen OR not dispatched" — callers must still validate normally.
 bool prevalidate(const uint64_t *entries, size_t n, std::atomic<uint64_t> *guards);
 
+// Prevalidations dispatched to the device since init. Always 0 while the CPU
+// fallback is in use, which is what lets a test tell "the device path was
+// exercised" apart from "the fallback was exercised" (see
+// tests/concurrency/repro_accel_teardown.cpp).
+uint64_t dispatch_count();
+
 // Release accelerator resources.
 void shutdown();
 

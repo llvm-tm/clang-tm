@@ -1104,11 +1104,100 @@ i.e. a recovery-visible bug) or not yet visible at all. *Fix*: allocate it in
 the totals now account for every transaction (this host has no RTM, so the RTM
 counters are legitimately zero).
 
+---
+
+## 32. ACCELTL2: teardown freed the device-shared guard table the STM still used (2026-11-26) ✅
+
+**Symptom.** On a host with a fine-grain-SVM device, the second `tm_init()` phase
+of a process that had already called `tm_exit()` crashed:
+
+```
+Thread 1 "repro_accel_tea" received signal SIGSEGV, Segmentation fault.
+tl2::STM::commit(tl2::Transaction*)       <-- guard-table load
+#1 real_tm_end()  #2 tx_run(...)  #3 run_phase(int)  #4 main
+```
+
+Reproduced single-threaded and deterministically by
+[`tests/concurrency/repro_accel_teardown.cpp`](../tests/concurrency/repro_accel_teardown.cpp):
+one phase of transactions, `tm_exit_thread(); tm_exit(); tm_init();
+tm_init_thread();`, another phase. Nothing about the workload is unusual —
+teardown and re-init are what the phase-switch tests and any embedded runtime
+that restarts its transactional section do.
+
+**Root cause — a lifetime inversion, plus a one-way switch.** `do_tm_exit()`
+called `accel::shutdown()`, which releases the `clSVMAlloc` block holding TL2's
+guard table, while
+
+* `tl2::STM::g_guards` still pointed into that block (nothing rebound it), and
+* `tl2::STM::initialized` stayed `true`, so the next `init()` skipped the whole
+  branch that would have acquired a new table.
+
+The next phase therefore did its guard arithmetic on memory the device driver
+owns again — here it happened to be unmapped, hence the immediate fault. Two
+details made it unrecoverable rather than merely ugly: `shutdown()` cleared
+`g.available`, and `probe_available()` gates `shared_guard_table()`, so even an
+explicit re-bind could not get a table back; and `shared_guard_table()`'s own
+`clSVMAlloc` failure paths cleared `g.available` as well, turning one
+transiently failing allocation into a process-permanent CPU fallback.
+
+**Secondary defects in the same module.** `available`, `probed` and
+`guards_svm` were plain fields: commit threads read them continuously while
+teardown wrote them, and `shutdown()` printed the dispatch statistics without
+the lock that serialises dispatches. None of that is a transaction-protocol
+problem, but all of it is unsynchronised state on the path a phase switch takes.
+
+**Fix.** Order, re-init support, and atomics:
+
+* `tl2::STM::accel_teardown()` (new) moves the guard table back onto the static
+  CPU backing store and clears the init latch; `do_tm_exit()` calls it *before*
+  `accel::shutdown()`, so the driver only reclaims memory nothing points at.
+  Guard contents are deliberately not carried across a phase boundary: the clock
+  restarts and the TM region is destroyed with the phase, so stale versions and
+  locks would be meaningless, and `init()` zeroes the table again.
+* `init()` now re-acquires the shared table whenever it is on the backing store
+  (instead of only when `g_guards` was never set), so phase 2 gets the
+  accelerator back.
+* `shutdown()` keeps `available` set: the context, program and queue stay
+  usable, so a later phase can re-bind. Only the SVM blocks are released —
+  after taking `dispatch_mu` and calling `clFinish`, so no kernel can still be
+  reading them, and the table pointer is cleared with an `exchange`.
+* `available`/`probed` became `std::atomic<bool>`, `guards_svm` an
+  `std::atomic<void *>` (release on publish, acquire at every read), and the two
+  statistics counters relaxed atomics. A failed `clSVMAlloc` no longer clears
+  availability.
+
+**Verification.** `repro_accel_teardown` goes from SIGSEGV to
+`device prevalidations dispatched: phase-1=64 phase-2=64` / PASS on the same
+binary path (AMD `gfx1151` iGPU, `TM_ACCEL_MIN=1` so every commit dispatches).
+ACCELTL2: `test_tx` 120/120, `test_ds` 207/207, `bank -t 8 -n 50000` conserves
+money both at the default threshold and with `TM_ACCEL_MIN=1`, and
+`drv_diff_ops -S 1..3 -T 8 -n 3000` reports
+`v_range=0 v_readown=0 v_ptr=0 quiesce_viol=0 alloc_viol=0` with the accelerator
+on and off. Plain TL2 (which shares `tl2.hpp`) is unchanged: 120/120, 207/207,
+bank and driver clean. ThreadSanitizer on the gated CPU path
+(`TM_ACCEL_DISABLE=1`) stays at **0** warnings. The pin is now part of
+`tools/diff_backends.sh`, which passes for all 21 backends.
+
+**What the device path's sanitizer noise actually is.** With the device forced
+on, the same ThreadSanitizer run reports 12 issues whose stacks name only
+`libamdocl64.so` and `libhsa-runtime64.so.1` — the AMD ICD and its HSA runtime —
+and no frame from `tl2.hpp`, `tl2_runtime.cpp` or `accel_probe.cpp`. They are
+created inside the driver's own context setup (visible as threads whose creation
+stack is in `libhsa-runtime64.so.1`), and they also appear with `-T 1`, where
+the STM layer has no threads of its own.
+[`tests/concurrency/tsan-suppressions-opencl.txt`](../tests/concurrency/tsan-suppressions-opencl.txt)
+documents and suppresses that (12 → 2; the survivors are an `unlock of an
+unlocked mutex` inside the ICD reached from `accel::shutdown()`, and a leaked
+driver thread). This is why `ci.yml`'s `tsan-gate` runs ACCELTL2 with
+`TM_ACCEL_DISABLE=1` and `nightly.yml`'s `accel-e2e` job covers the device path
+functionally instead.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
-| Per-backend ThreadSanitizer data races (nearly drained) | Low | Post-§30/§31 sweep of `drv_diff_ops -S 1 -T 4 -n 200`: **18 of 19** backends report **0** warnings and **0** consistency violations. Only ACCELTL2's accelerator plumbing remains (2 write/write races in the SVM-allocated guard table plus a thread that is never joined) — host-side table management that needs a machine with a real IGP to review. `.github/workflows/ci.yml`'s `tsan-gate` job gates on the clean list; details in `TODO.md`. |
+| Per-backend ThreadSanitizer races (drained) | Low | Post-§30/§31 sweep of `drv_diff_ops -S 1 -T 4 -n 200`: **every** backend reports **0** warnings and **0** consistency violations, ACCELTL2 included. Its device path still prints 12 reports under ThreadSanitizer, but every one of them has its stack inside `libamdocl64.so`/`libhsa-runtime64.so.1` and none names one of our sources (§32); `tests/concurrency/tsan-suppressions-opencl.txt` documents them, `ci.yml`'s `tsan-gate` gates the CPU path, and `nightly.yml`'s `accel-e2e` covers the device path functionally. |
+| `tm_swap_runtime()` publication | Low | A phase switch writes all 23 dispatch pointers under `s_hook_mutex` while other threads read them locklessly, so a switch racing with live transactions could mix two backends' hooks. Its only caller (`tests/explicit-api/test_phase_switch.cpp`) is single-threaded, so this is latent rather than live, and no sanitizer case exercises it. Needs per-thread shadow tables or a quiescence epoch; see `TODO.md`. |
 | ARM TME simulation: built but never run | Medium | gem5 v25.1.0.1 implements TME, and the path is now complete on the input side: `configs/arm-tme-kvm.py` adds the `TME` release extension, `workloads/tme/Makefile` builds with `-march=armv8.1-a+tme` (needs `gcc-aarch64-linux-gnu`; clang has no Arm TME support through LLVM 22), and `nightly.yml` compiles both the RTM and TME workloads. Still missing: an ARM/ALL gem5 build (`setup.sh` only produces `build/X86_TSX`) and therefore an end-to-end `scripts/run-arm-tme.sh` run. x86 TSX is the reference path that works. |
 | CSMV GPU kernel: no commit validation, `>>3` aliasing, no server | High | `gpu/backends/csmv/cuda/`: `csmv_device_commit` performs no read-set validation (conflicting transactions both install versions), `csmv_gpu_entry_idx()` still keys chains by `>> 3` with no owner tag (§25 on CPU, unfixed on GPU), and neither GPU path implements the block-0/server-warp commit that `docs/proofs/GPU_STM_PLAN.md:19` specifies. CPU model of the server commit exists (`CSMV_SERVER_COMMIT=1`). Porting needs a GPU runner: the `gpu/` tree is compiled in `nightly.yml` only, never correctness-gated. |
 | TinySTM STMbench7 crash (STL vector realloc) | High | STL-in-TM incompatibility, pre-existing |

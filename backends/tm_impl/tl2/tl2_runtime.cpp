@@ -59,6 +59,11 @@ TM_PLUGIN_LIFECYCLE_FN(do_tm_init, extern "C" void tm_init())
 TM_PLUGIN_LIFECYCLE_FN(do_tm_exit, extern "C" void tm_exit())
 {
 #ifdef TM_ACCEL_GPU
+	// Order matters: the STM must stop pointing at the device-shared guard table
+	// before the accelerator module releases that memory back to the driver.
+	// Freeing it first left g_guards dangling, so the next tm_init() phase
+	// segfaulted inside commit() (tests/concurrency/repro_accel_teardown.cpp).
+	tl2::accel_teardown();
 	accel::shutdown();
 #endif
 	stm::tm_region_destroy();

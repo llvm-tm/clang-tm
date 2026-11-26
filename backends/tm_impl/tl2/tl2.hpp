@@ -309,7 +309,11 @@ public:
 		if (!initialized.load(std::memory_order_seq_cst)) {
 			g_clock.store(1, std::memory_order_relaxed);
 #ifdef TM_ACCEL_GPU
-			if (!g_guards) {
+			// (Re)acquire the device-shared table whenever we are on the static
+			// backing store. accel_teardown() leaves us there precisely because
+			// the driver reclaimed the shared block, so a second tm_init() phase
+			// has to try again rather than keep the CPU copy forever.
+			if (!g_guards || g_guards == accel_backing()) {
 				std::atomic<word_t> *shared = nullptr;
 				if (accel::probe_available())
 					shared = accel::shared_guard_table(GUARD_TABLE_SIZE);
@@ -321,6 +325,24 @@ public:
 			initialized.store(true);
 		}
 	}
+
+#ifdef TM_ACCEL_GPU
+	// Process teardown (tm_exit): move the guard table back onto the static CPU
+	// backing store and clear the init latch, so that (a) nothing is still
+	// pointing at the fine-grain-SVM block accel::shutdown() hands back to the
+	// device driver, and (b) a later tm_init() re-probes and re-binds a shared
+	// table. Guard contents are not carried across a teardown: the clock restarts
+	// and the TM region is destroyed with the phase, so stale versions and locks
+	// would be meaningless (init() zeroes the table again).
+	//
+	// Only legal at teardown, i.e. when no transaction can be in flight, because
+	// the guard-table pointer itself is read lock-free by every guard operation.
+	static void accel_teardown()
+	{
+		g_guards = accel_backing();
+		initialized.store(false, std::memory_order_release);
+	}
+#endif
 
 	static word_t get_clock() { return g_clock.load(std::memory_order_relaxed); }
 
@@ -908,6 +930,10 @@ std::atomic<bool> STM::initialized{false};
 thread_local Transaction *current_tx = nullptr;
 
 inline void init() { STM::init(); }
+
+#ifdef TM_ACCEL_GPU
+inline void accel_teardown() { STM::accel_teardown(); }
+#endif
 
 inline void init_thread()
 {

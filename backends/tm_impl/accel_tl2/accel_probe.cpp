@@ -168,8 +168,13 @@ constexpr const char
             "}\n";
 
 struct State {
-	bool probed = false;
-	bool available = false;
+	std::atomic<bool> probed{false};
+	// Set once by do_probe and never cleared: shutdown() releases the SVM
+	// blocks, but the context, program and kernel stay usable, and clearing this
+	// instead would disarm the accelerator forever — a second tm_init() phase
+	// could never re-acquire a shared guard table (see
+	// tests/concurrency/repro_accel_teardown.cpp).
+	std::atomic<bool> available{false};
 	bool verbose = false;
 	uint64_t min = 4096;
 	uint64_t svm_caps = 0;
@@ -183,13 +188,16 @@ struct State {
 	cl_program prog = nullptr;
 	cl_kernel kernel = nullptr;
 
-	void *guards_svm = nullptr;
-	void *log_svm = nullptr;
-	int *flag_svm = nullptr;
+	// Published by shared_guard_table(), released by shutdown(), and read by
+	// every commit thread through tl2's guard pointer, so the state that says
+	// whether it exists has to be atomic.
+	std::atomic<void *> guards_svm{nullptr};
+	void *log_svm = nullptr; // only touched under dispatch_mu
+	int *flag_svm = nullptr; // only touched under dispatch_mu
 
 	// stats (verbose reporting at shutdown): dispatches, conflicts found
-	uint64_t n_dispatch = 0;
-	uint64_t n_conflict = 0;
+	std::atomic<uint64_t> n_dispatch{0};
+	std::atomic<uint64_t> n_conflict{0};
 
 	std::mutex dispatch_mu; // one queue: serialize dispatches
 };
@@ -357,12 +365,18 @@ bool probe_available()
 	return g.available;
 }
 
-bool guards_shared() { return probe_available() && g.guards_svm != nullptr; }
+bool guards_shared()
+{
+	return probe_available() && g.guards_svm.load(std::memory_order_acquire) != nullptr;
+}
 
 std::atomic<uint64_t> *shared_guard_table(size_t n_entries)
 {
-	if (!probe_available() || g.guards_svm)
-		return reinterpret_cast<std::atomic<uint64_t> *>(g.guards_svm);
+	if (!probe_available())
+		return nullptr;
+	void *already = g.guards_svm.load(std::memory_order_acquire);
+	if (already)
+		return reinterpret_cast<std::atomic<uint64_t> *>(already);
 	// CL_MEM_SVM_FINE_GRAIN_BUFFER as an ALLOCATION flag is required to
 	// actually get fine-grain memory: without it the runtime may fall
 	// back to coarse-grain placement, whose CPU-side mapping is uncached
@@ -370,12 +384,14 @@ std::atomic<uint64_t> *shared_guard_table(size_t n_entries)
 	// ~2 ns cached — i.e. a 30-80x backend-wide slowdown).
 	// Alignment 0 = let the runtime choose (explicit large alignments are
 	// rejected by some ICDs, e.g. AMD's for gfx1151).
-	g.guards_svm = g.cl.SVMAlloc(g.ctx,
+	void *guards = g.cl.SVMAlloc(g.ctx,
 	                             CL_MEM_READ_WRITE | CL_MEM_SVM_FINE_GRAIN_BUFFER,
 	                             n_entries * sizeof(uint64_t),
 	                             0);
-	if (!g.guards_svm) {
-		g.available = false;
+	if (!guards) {
+		// Not fatal and not permanent: the caller keeps its static backing
+		// store, and a later phase may allocate successfully. Clearing
+		// available here would disarm the accelerator for the whole process.
 		if (g.verbose)
 			printf("[accel] clSVMAlloc(guards) failed — falling back to CPU path\n");
 		return nullptr;
@@ -390,20 +406,28 @@ std::atomic<uint64_t> *shared_guard_table(size_t n_entries)
 	                          0);
 	g.flag_svm = (int *)g.cl.SVMAlloc(g.ctx, CL_MEM_READ_WRITE, sizeof(int), 0);
 	if (!g.log_svm || !g.flag_svm) {
-		g.available = false;
+		g.cl.SVMFree(g.ctx, guards);
+		if (g.verbose)
+			printf("[accel] clSVMAlloc(staging) failed — falling back to CPU path\n");
 		return nullptr;
 	}
-	return reinterpret_cast<std::atomic<uint64_t> *>(g.guards_svm);
+	// Release so a commit thread that sees a non-null table through
+	// guards_shared()/prevalidate also sees the allocation itself.
+	g.guards_svm.store(guards, std::memory_order_release);
+	return reinterpret_cast<std::atomic<uint64_t> *>(guards);
 }
 
 uint64_t min_entries() { return g.min; }
 
+uint64_t dispatch_count() { return g.n_dispatch.load(std::memory_order_relaxed); }
+
 bool prevalidate(const uint64_t *entries, size_t n, std::atomic<uint64_t> *guards)
 {
-	if (!g.available || !g.guards_svm || n < g.min || n > g.cap)
+	void *gs = g.guards_svm.load(std::memory_order_acquire);
+	if (!g.available.load(std::memory_order_relaxed) || !gs || n < g.min || n > g.cap)
 		return false;
-	if (reinterpret_cast<void *>(guards) != g.guards_svm)
-		return false; // guard table never went shared
+	if (reinterpret_cast<void *>(guards) != gs)
+		return false; // guard table never went shared (or was released)
 
 	std::lock_guard<std::mutex> lk(g.dispatch_mu);
 	memcpy(g.log_svm, entries, n * 2 * sizeof(uint64_t)); // CPU store, no DMA copy
@@ -411,7 +435,7 @@ bool prevalidate(const uint64_t *entries, size_t n, std::atomic<uint64_t> *guard
 
 	cl_int e = 0;
 	e |= g.cl.SetKernelArgSVMPointer(g.kernel, 0, g.log_svm);
-	e |= g.cl.SetKernelArgSVMPointer(g.kernel, 1, g.guards_svm);
+	e |= g.cl.SetKernelArgSVMPointer(g.kernel, 1, gs);
 	e |= g.cl.SetKernelArgSVMPointer(g.kernel, 2, g.flag_svm);
 	uint64_t nn = n;
 	e |= g.cl.SetKernelArg(g.kernel, 3, sizeof(nn), &nn);
@@ -431,33 +455,44 @@ bool prevalidate(const uint64_t *entries, size_t n, std::atomic<uint64_t> *guard
 		return false;
 	if (g.cl.Finish(g.queue) != CL_SUCCESS)
 		return false;
-	++g.n_dispatch;
+	g.n_dispatch.fetch_add(1, std::memory_order_relaxed);
 	bool conflict = *g.flag_svm != 0;
 	if (conflict)
-		++g.n_conflict;
+		g.n_conflict.fetch_add(1, std::memory_order_relaxed);
 	return conflict;
 }
 
 void shutdown()
 {
-	if (!g.probed)
+	if (!g.probed.load(std::memory_order_acquire))
 		return;
+	// Serialize with prevalidate(): holding the dispatch lock means no kernel can
+	// be reading the staging buffer or the guard table from here on, so the
+	// Finish below is the last thing the device does with them.
+	std::lock_guard<std::mutex> lk(g.dispatch_mu);
 	if (g.verbose)
 		printf("[accel] stats: %llu GPU prevalidations dispatched, %llu conflicts "
 		       "found\n",
-		       (unsigned long long)g.n_dispatch,
-		       (unsigned long long)g.n_conflict);
-	if (g.guards_svm)
-		g.cl.SVMFree(g.ctx, g.guards_svm);
-	if (g.log_svm)
-		g.cl.SVMFree(g.ctx, g.log_svm);
-	if (g.flag_svm)
-		g.cl.SVMFree(g.ctx, g.flag_svm);
-	g.guards_svm = g.log_svm = nullptr;
-	g.flag_svm = nullptr;
+		       (unsigned long long)g.n_dispatch.load(std::memory_order_relaxed),
+		       (unsigned long long)g.n_conflict.load(std::memory_order_relaxed));
+	// Drain the queue before releasing anything it may still be reading.
 	if (g.kernel)
 		g.cl.Finish(g.queue);
-	g.available = false;
+	void *guards = g.guards_svm.exchange(nullptr, std::memory_order_acq_rel);
+	if (guards)
+		g.cl.SVMFree(g.ctx, guards);
+	if (g.log_svm) {
+		g.cl.SVMFree(g.ctx, g.log_svm);
+		g.log_svm = nullptr;
+	}
+	if (g.flag_svm) {
+		g.cl.SVMFree(g.ctx, g.flag_svm);
+		g.flag_svm = nullptr;
+	}
+	// g.available deliberately stays true: the context/kernel are still usable
+	// and the next tm_init() phase re-acquires a guard table through
+	// shared_guard_table(). tl2 points its guard table at the CPU backing store
+	// before calling this, so nothing is left looking at freed memory.
 }
 
 } // namespace accel

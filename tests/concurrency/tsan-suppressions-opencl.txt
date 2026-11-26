@@ -1,0 +1,17 @@
+# ThreadSanitizer suppressions for runs that use the OpenCL/SVM accelerator path.
+#
+# These are NOT suppressions of backend code. The AMD HSA runtime that sits
+# behind the OpenCL ICD creates its own worker threads when a context is made
+# (visible in the reports as threads whose creation stack is inside
+# libhsa-runtime64.so.1) and its internal bookkeeping races with itself. The
+# reports are identical with -T 1, where the STM layer has no threads of its
+# own, and they disappear entirely under TM_ACCEL_DISABLE=1, so nothing here
+# hides a transactional-memory race.
+#
+# Use with the accelerator forced on so the device path really is exercised:
+#   TSAN_OPTIONS="halt_on_error=0:suppressions=tests/concurrency/tsan-suppressions-opencl.txt" \
+#   TM_ACCEL_MIN=1 ./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 4 -n 200
+called_from_lib:libhsa-runtime64.so.1
+called_from_lib:libamdocl64.so
+called_from_lib:libamdocl-lite64.so
+called_from_lib:libOpenCL.so.1

@@ -276,3 +276,66 @@ jobs:
           llvm-cov-22 report ./benchmarks/cpp/bin/test_tx -instr-profile=/tmp/tx.profdata \
             backends/tm_impl/norec backends/tm_impl/common \
             backends/tm_impl/tm_region_allocator explicit_api | tail -40
+
+  # ── Zero-copy accelerator path, end to end (ACCELTL2) ──────────────────
+  # ACCELTL2 puts TL2's guard table in fine-grain-SVM memory so a device can
+  # prevalidate read sets against the same bytes the CPU locks. Whether that is
+  # the real device path or the documented CPU fallback depends on the host, so
+  # the job tests correctness always and device usage only when a device exists:
+  #   - always: the T1 driver's oracle counters are 0 and bank conserves money
+  #     with prevalidation forced on for every commit (TM_ACCEL_MIN=1);
+  #   - with a fine-grain-SVM device present: that work actually reached it, so
+  #     a machine that silently fell back cannot report the accelerator as tested.
+  # Non-blocking: accelerator-free runners only cover the fallback. On a host
+  # with an iGPU/GPU this is the end-to-end test of the zero-copy design.
+  accel-e2e:
+    name: Zero-copy accelerator path (ACCELTL2)
+    runs-on: ubuntu-24.04
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install an OpenCL ICD loader
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ocl-icd-opencl-dev || true
+
+      - name: Build ACCELTL2 driver and bank
+        run: make -C benchmarks/cpp bin/drv_diff_ops bin/bank BACKEND=ACCELTL2
+
+      - name: Run with device prevalidation forced on for every commit
+        env:
+          TM_ACCEL_VERBOSE: "1"
+          TM_ACCEL_MIN: "1"
+        run: |
+          set -o pipefail
+          ./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 8 -n 3000 2>&1 | tee /tmp/accel-drv.log
+          ./benchmarks/cpp/bin/bank -t 4 -n 20000 2>&1 | tee /tmp/accel-bank.log
+          grep -q "PASS: Money conserved" /tmp/accel-bank.log
+          grep -qE "v_range=0 v_readown=0 v_ptr=0 quiesce_viol=0 alloc_viol=0" /tmp/accel-drv.log
+
+      - name: Assert the device was used when one is present
+        # Trust the backend's own probe line instead of re-enumerating OpenCL
+        # here: "fine-grain SVM OK" is printed exactly when the guard table was
+        # placed in memory the device can dereference, which is the only case in
+        # which a prevalidation can be dispatched at all.
+        run: |
+          dispatched=$(grep -oE '[0-9]+ GPU prevalidations dispatched' /tmp/accel-drv.log | tail -1 | grep -oE '^[0-9]+')
+          dispatched=${dispatched:-0}
+          if grep -q "fine-grain SVM OK" /tmp/accel-drv.log; then
+            echo "device present (guard table shared); prevalidations dispatched: $dispatched"
+            if [ "$dispatched" -eq 0 ]; then
+              echo "::error::a fine-grain-SVM device was found but nothing was dispatched: only the CPU fallback ran"
+              exit 1
+            fi
+          else
+            echo "no fine-grain-SVM device: this run exercised the CPU fallback (dispatched=$dispatched)"
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "### Accelerator probe and stats" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          grep -hE "^\[accel\]" /tmp/accel-drv.log /tmp/accel-bank.log 2>/dev/null | head -8 >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

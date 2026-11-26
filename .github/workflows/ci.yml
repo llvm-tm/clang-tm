@@ -305,13 +305,14 @@ jobs:
 
 
   # ── Job 10b: TSan race gate (race-clean backends) ─────────
-  # These backends report zero ThreadSanitizer warnings on the T1 differential
-  # driver, and the driver exits non-zero on any consistency violation, so this
-  # job fails on a newly introduced race. Only ACCELTL2 is missing: it still
-  # carries known races in its OpenCL/SVM guard table (known-issues table in
-  # docs/CORRECTNESS_FIXES.md, triage table in TODO.md) and is swept
-  # non-blocking in nightly.yml until that drains; add a backend here as soon as
-  # its row in that table reaches 0.
+  # Every C++ backend in the tree is gated: all of them report zero
+  # ThreadSanitizer warnings on the T1 differential driver, and the driver exits
+  # non-zero on any consistency violation, so a race or anomaly introduced into
+  # any backend now fails the PR. ACCELTL2 is gated on its CPU path (see the
+  # TM_ACCEL_DISABLE comment below); its device-backed SVM path needs a machine
+  # with a real IGP and stays in the non-blocking nightly sweep. When a backend
+  # regresses, docs/CORRECTNESS_FIXES.md's known-issues table and the triage
+  # table in TODO.md say where the pattern usually is.
   tsan-gate:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
@@ -336,6 +337,7 @@ jobs:
           - TSXSGL
           - SPHT
           - GPU_STM_CPU
+          - ACCELTL2
     runs-on: ubuntu-22.04
     timeout-minutes: 25
     env:
@@ -356,6 +358,14 @@ jobs:
       - name: Build TSan differential driver (${{ matrix.backend }})
         run: make -C benchmarks/cpp bin/drv_diff_ops BACKEND=${{ matrix.backend }} SANITIZE=thread
       - name: Run TSan differential driver (${{ matrix.backend }})
+        # ACCELTL2 is gated on its CPU path: the OpenCL ICD the accelerator
+        # probe dlopens spawns its own (uninstrumented) worker threads and
+        # allocates through them, which ThreadSanitizer reports as races and a
+        # thread leak that no backend code can fix. With the probe disabled the
+        # backend is race-clean; the device-backed SVM path is exercised only on
+        # accelerator-enabled hosts, never here.
+        env:
+          TM_ACCEL_DISABLE: ${{ matrix.backend == 'ACCELTL2' && '1' || '0' }}
         run: |
           set -o pipefail
           ./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 4 -n 200 2>&1 | tee /tmp/tsan-run.log

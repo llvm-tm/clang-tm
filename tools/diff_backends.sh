@@ -52,6 +52,17 @@ for be in $BACKENDS; do
 			echo "== $be: FAIL repro_bucket_alias (version store aliases word-sharing objects)"
 		fi
 	fi
+	# Accelerator teardown pin: only ACCELTL2 has a device-shared guard table to
+	# mis-time, so the program SKIPs (exit 0) for every other backend. With
+	# TM_ACCEL_MIN=1 a host that does have a fine-grain-SVM device re-inits the
+	# STM mid-process and must keep dispatching; a host without one skips.
+	if make -C benchmarks/cpp bin/repro_accel_teardown BACKEND="$be" >/dev/null 2>&1; then
+		if ! TM_ACCEL_MIN=1 ./benchmarks/cpp/bin/repro_accel_teardown >"/tmp/accel_td_$be.log" 2>&1; then
+			ok=0
+			echo "== $be: FAIL repro_accel_teardown (tm_exit freed the shared guard table under the STM)"
+			tail -6 "/tmp/accel_td_$be.log"
+		fi
+	fi
 	if [ $ok -eq 1 ]; then
 		echo "== $be: PASS"
 		passed="$passed $be"

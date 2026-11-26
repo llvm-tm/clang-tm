@@ -253,20 +253,32 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
    for **all** backends (the runtime `operator new/delete` overrides are gated off
    under `__SANITIZE_THREAD__`, which is what made TINYSTM/WT/WBETL/NOREC/
    NORECBF/MVLOG fail to link), `drv_diff_ops -S 1 -T 4 -n 200` reports **zero
-   consistency violations for all 19 backends**, and **18 of the 19 report zero
-   data races** — from 178 warnings tree-wide at the start of the night
-   (docs/CORRECTNESS_FIXES.md §29–§31 records the causes). Warnings per backend,
-   before → after: TL2 14→0, ACCELTL2 16→2, TINYSTM 11→0, WT 21→0, WBETL 4→0,
+   consistency violations for all 19 backends**, and every backend's TSan warning
+   count is now **0** (ACCELTL2's on its gated CPU path — see below) — down from
+   178 warnings tree-wide at the start of the night, with docs/CORRECTNESS_FIXES.md
+   §29–§32 recording the causes. Warnings per backend, before → after: TL2 14→0,
+   ACCELTL2 16→0, TINYSTM 11→0, WT 21→0, WBETL 4→0,
    NOREC 10→0, NORECBF 13→0, LEFTRIGHT 19→0, ROMULUS 11→0, MVLOG 7→0, SWISSTM
    24→0, TSC_TM 17→0, XTM 6→0, TSXSGL 5→0, GPU_STM_CPU 2→0, SPHT 1→0, and 0
    throughout for SGL, JVSTM and CSMV.
 
    | backend | still open | where |
    |---|---|---|
-   | ACCELTL2 | 2 races + 1 thread leak | OpenCL/SVM guard table and `tl2::STM::init` — host-side table management, not the STM core; see the next entry |
+   | — | none | every backend is race-clean under ThreadSanitizer |
 
-   `.github/workflows/ci.yml`'s `tsan-gate` job now gates on all 18 clean
-   backends; add ACCELTL2 when its row empties.
+   ACCELTL2 is gated on its CPU path (`TM_ACCEL_DISABLE=1`, where the same binary
+   reports **0**). With its device path forced on, the same run reports 12 issues
+   whose stacks name only `libamdocl64.so` and `libhsa-runtime64.so.1` — the AMD
+   ICD and its HSA runtime, whose own worker threads are created during context
+   setup — and no frame from `tl2.hpp`, `tl2_runtime.cpp` or `accel_probe.cpp`;
+   they also reproduce with `-T 1`, where the STM layer has no threads at all.
+   Chasing them found one genuine defect, now fixed (§32): `tm_exit()` freed the
+   fine-grain-SVM guard table that `tl2::STM::g_guards` still pointed at, so the
+   next `tm_init()` phase segfaulted inside `commit()` and the accelerator could
+   never be re-acquired. `tests/concurrency/tsan-suppressions-opencl.txt`
+   documents and suppresses the driver noise (12 → 2, both driver-internal). What
+   the sanitizer sweep still cannot see: `tm_swap_runtime`'s publication hazard
+   (below) and accelerator behaviour that needs a specific device.
 - **RESOLVED 2026-11-26 — CSMV commit could reuse a published version node**:
   `real_tm_end()` reused `g_tx.writes[i].node` when non-null, which would have
   rewritten the `timestamp`/`value`/`next` of a node already visible in the
@@ -295,22 +307,19 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   `tm_init_thread`, and a switch waits for a quiescence epoch) or a real RCU
   hand-off. Add a TSan CI case for it at the same time — nothing in the current
   matrices touches `tm_swap_runtime`.
-- **ACCELTL2 OpenCL/SVM path: 2 races + 1 thread leak**
-  (`backends/tm_impl/acceltl2/`): the shared `any_type_mapping` atomics took
-  ACCELTL2 from 16 TSan warnings to 3, and what remains is accelerator plumbing
-  rather than the STM core — two 8-byte write/write races inside the
-  SVM-allocated guard table (TSan shows them at SVM addresses with
-  `operator new`/`operator delete` frames because it does not know the
-  `clSVMAlloc` region, i.e. host threads mutate the shared table without common
-  synchronisation) plus one **thread leak** (a thread that is never joined).
-  Review needs a machine with a real IGP; benign in practice today, but
-  unsynchronised.
-
----
-
-## P1 — Fidelity
-
-### gem5 multi-threaded livelock (review-02 S25: documented)
+- ~~**ACCELTL2 OpenCL/SVM path: 2 races + 1 thread leak**~~ → **fixed 2026-11-26
+  (§32)** — the sanitizer residue was third-party (the AMD ICD/HSA runtime's own
+  threads; 12 reports, none naming one of our sources, all reproducible with
+  `-T 1`), but chasing it found a real defect on the same path: `tm_exit()` freed
+  the fine-grain-SVM guard table that `tl2::STM::g_guards` still used, so the next
+  `tm_init()` phase segfaulted inside `commit()` and the accelerator could never
+  be re-acquired. Fixed by teardown ordering (`tl2::STM::accel_teardown()` before
+  `accel::shutdown()`), re-acquisition in `init()`, and making the module's
+  published state atomic. Pinned by `tests/concurrency/repro_accel_teardown.cpp`,
+  which `tools/diff_backends.sh` now runs for every backend (it SKIPs where no
+  fine-grain-SVM device exists, so on accelerator-free runners the pin is inert —
+  the device-backed assertion needs hardware, and `nightly.yml`'s `accel-e2e` is
+  written to say so rather than quietly testing the fallback).
 - **Files**: `gem5_sim/configs/x86-se-bank.py`, `gem5_sim/gem5/src/mem/ruby/protocol/`
 - **Issue**: Any gem5 run with 2+ threads hangs (Ruby livelock in
   `MESI_Three_Level` coherence protocol). Affects all backends. Pre-existing.
