@@ -1245,6 +1245,87 @@ backends × the driver) so neither class can return silently, and its
 `llvm-symbolizer` loses the report *and* turns the exit status into 141 (SIGPIPE),
 which is how this host's toolchain defect first masqueraded as backend failures.
 
+## 34. MVLog reclamation folded the wrong slot range and rolled committed memory back (2026-11-26) ✅
+
+Found by running the T1 differential driver over **op-class masks** (`-M`, one
+operation class per run), a shape CI had never run. MVLOG lost committed writes
+at `-T 8 -n 2000`: `-M 2` failed 3/8 seeds, `-M 8` 6/8, `-M 16` 4/8, while
+`-M 1`, `-M 4`, `-M 32`, `-M 64` and the default mixed shape were clean, and
+`test_tx`/`test_ds` were 120/120 and 207/207 throughout. `nm -C` confirmed binary
+identity (18 `mvlog` symbols, no other backend's). ThreadSanitizer reported
+nothing — correctly, this is not a data race.
+
+**Root cause.** The reclamation fold iterated `[g_wm, slot)` — *strictly below
+its own slot* — even though its write-through had already put its own values in
+`g_mem`. Re-folding older entries afterwards therefore re-installed the
+**second-newest** committed value for every address the reclaimer itself had
+written. Instrumenting the fold's individual writes shows it directly; at slot
+16405 a hot counter that stood at 1388 was written back to 1001 and walked
+forward entry by entry, 438 writes, ending below 1388:
+
+```
+[fold] s=24  slot=16405 addr=0x…0fc old=1388 new=1001
+[fold] s=100 slot=16405 addr=0x…0fc old=1001 new=1002
+[fold] s=130 slot=16405 addr=0x…0fc old=1002 new=1003
+```
+
+The `g_dirty.clear()` that follows is what makes this dangerous rather than
+merely wasteful: clearing the filter is the protocol announcing that memory holds
+the newest committed value, so a fast-path read of such an address is *legal*,
+and `resolve()` likewise falls back to `g_mem` for folded slots — validation
+cannot see the discrepancy either. Auditing every reclamation (compare memory
+against what the index says the newest writer wrote, for every address the fold
+touched) gives the exact size of the damage: **one address left behind per
+address the reclaimer wrote** — `behind=1` of 1 checked at `-M 16` (a single
+shared counter), 1 of 80 at `-M 8`, 1–2 of 168 on the mixed shape. It becomes an
+observable lost update only when such an address is not rewritten before
+quiescence; with `-M 16` the reclaim lands ~20 slots before the end and only
+~15 % of transactions touch that counter, so it survives on 4–6 seeds of 8,
+while the mixed shape's 168 addresses are all rewritten within milliseconds. That
+is why the default shape passed, and it is also why no reader-visible staleness
+showed up in a probe of the fast path (0 reads where memory disagreed with the
+newest log entry in these runs): the damage was to the committed state itself,
+which is what `peek()`, direct reads and the process's final state see.
+
+**A second reason it survived CI**: reclamation only runs once the live window
+passes `kReclaimThreshold` (16 384 slots), and CI's scenarios topped out at
+9 600 slots — CI never executed a reclamation at all for any seed.
+
+**Fix** (`backends/tm_impl/mvlog/MVLog.hpp`): fold `[g_wm, slot]`, from the
+watermark read *after* the commit lock is taken through the current slot
+inclusive. Both bounds carry weight:
+
+- *Inclusive end*: with ascending slot order, this makes the last write per
+  address the newest commit's, which is exactly the invariant the clear relies
+  on.
+- *Start at the current watermark*: the old code folded from a snapshot taken
+  before the predecessor wait, so it also re-wrote `g_mem` for entries an earlier
+  reclamation had already folded and un-dirtied — i.e. for addresses that
+  concurrent readers are entitled to read straight from memory.
+
+A debug build now asserts the post-fold invariant (memory equals this commit's
+value for every address it wrote). The two byte-width tables in the file
+(`entrySize`, `typeSize`) were replaced by one `value_size()` rather than
+duplicated a third time for the assertion.
+
+**Verification.** The assertion **fires on the pre-fix code** (`rc=134`,
+`TM ASSERTION FAILED: reclamation rolled back a committed write`) and stays
+silent after the fix. Post-fix: 0/8 seeds on all three previously failing masks;
+a 200-run stress (masks 1–128 and 255 × `T` ∈ {4, 8} × 8 seeds, plus `-R`, plus
+`-n 20000` runs) with **0 failures**; the fold audit reports `behind=0` on every
+reclamation for `-M 8`, `-M 16` and the mixed shape. `test_tx` 120/120,
+`test_ds` 207/207. ThreadSanitizer: 0 races on five driver shapes (including
+`-M 16` and `-R`) and on `test_ds`. AddressSanitizer: 0 errors and 0 leaks on
+`bank`/`test_tx`/`test_ds` (MVLOG is in the leak-gated CI set). UBSan: 0 findings
+on three shapes. `tools/diff_backends.sh` gained the `-M 16`, `-M 8` and `-R`
+scenarios at `-n 2000` (enough slots to cross the threshold) for every backend —
+all 21 pass — and `make check-diff` is green with them.
+
+`backends/tm_impl/mvlog/Implementation_notes.md` §5 described reclamation as
+happening "only at a quiescence point", which the code has never done; it now
+documents the real scheme, both bounds, and why the concurrent
+`BloomFilter::clear()` is sound only because of them.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

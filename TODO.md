@@ -335,6 +335,33 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   `x86-tsx-validation.md` are tick-capped partial samples — see
   `gem5_sim/docs/x86-tsx-real-validation.md` §2.
 
+### MVLog: reclamation is outside its model, and the fold serialises every commit (P2, opened 2026-11-26)
+
+Fixed the correctness half today (CORRECTNESS_FIXES.md §34: the fold skipped the
+reclaimer's own slot and left committed memory one commit behind). Two things
+remain:
+
+- **The TLA+ model cannot see this class.** `docs/proofs/MVLog.tla` abstracts
+  reclamation away (Implementation_notes.md §5/§7: the model uses a
+  no-reclamation `dirty` set), which is exactly why §34 survived it. Extending it
+  with a `mem` map plus a fold action whose range is `[wm, slot]` — and checking
+  `AddrNotDirty ⇒ mem[addr] = newestCommitted[addr]` — would gate the invariant
+  the fast path depends on. Small model, `docs/proofs/Makefile` already runs
+  three models in the `tla-smoke` job.
+- **The fold runs under `g_commit_lock`.** It scans the whole window
+  (`kReclaimThreshold` = 16 384 entries) with nothing else able to commit; the
+  measured reclaim events in a 16 k-transaction run each touched ~80–170 distinct
+  addresses, but the scan itself is O(window) and head-of-line-blocks every
+  commit for its duration. Amortising it (fold a bounded chunk per reclaim, or
+  fold eagerly when an entry leaves the window) is a measurement-first change:
+  time `bank -t 8` and the driver with the threshold at 1024 vs 16384 before
+  picking.
+
+Coverage note for any future windowed-reclamation backend: a driver scenario must
+claim **more slots than the backend's reclamation threshold** or it never
+executes a reclamation. MVLog's is 16 384 slots; `tools/diff_backends.sh`'s
+`-T 8 -n 2000` legs are sized for that and say so.
+
 ### Exit-time leaks: 11 of 21 backends are leak-clean and gated; 10 are not (opened 2026-11-26)
 
 `ci.yml`'s `sanitizer` job now runs AddressSanitizer over `bank`/`test_tx`/`test_ds`

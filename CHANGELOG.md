@@ -3564,3 +3564,61 @@ note that freeing them at thread exit would be unsafe, and what to do instead).
 meanwhile. Docs: `docs/DEBUGGING_BACKENDS.md` §4b (UBSan/LSan recipe, including
 the symbolizer pitfall and how to tell the three UBSan shapes apart),
 `docs/DEVELOPER_GUIDE.md` CI tables.
+
+## Session 2026-11-26 (small hours, later) — MVLog reclamation rolled committed memory back (§34)
+
+Ran the T1 driver over **op-class masks** (`-M`) and per-thread partitioning
+(`-R`), shapes CI had never executed, across all 21 backends: 420 runs, one
+backend failed — MVLOG lost committed writes at `-T 8 -n 2000` on `-M 2` (3/8
+seeds), `-M 8` (6/8) and `-M 16` (4/8), while the mixed shape and every other
+mask passed and TSan/ASan/UBSan saw nothing.
+
+Root cause, measured rather than inferred: the reclamation fold iterated
+`[g_wm, slot)`, excluding its own entry, although its write-through had already
+put the newest values in memory — so it re-installed the *second-newest* value
+for every address the reclaimer wrote. Instrumenting the individual fold writes
+caught a hot counter being taken from 1388 back to 1001 and walked up again, 438
+writes, ending short; auditing each reclamation against the index showed exactly
+one address left behind per address the reclaimer wrote (1 of 1 at `-M 16`, 1 of
+80 at `-M 8`, 1–2 of 168 mixed — which is why the mixed shape hid it). The
+`g_dirty.clear()` right after it is what turns that into a protocol violation:
+clearing the filter is how MVLog tells lock-free readers that memory is
+authoritative, and `resolve()` likewise trusts memory for folded slots, so
+neither reads nor validation can detect it. A probe for fast-path reads that
+disagreed with the newest log entry reported 0, so in these runs the damage was
+to the committed state itself (what `peek()`, direct reads and the final state
+see) rather than to a transaction's view.
+
+Fix: fold `[g_wm, slot]` inclusive, starting from the watermark read *after* the
+commit lock is taken (folding from the pre-wait snapshot also rewrote memory for
+addresses an earlier reclamation had already un-dirtied — precisely the ones
+readers may take from memory). Added a debug-build assertion, which **fires on
+the old code and stays silent on the new one**, and replaced the file's two
+duplicated byte-width tables with one `value_size()`.
+
+Verification: 0/8 seeds on all three failing masks; 200-run stress (every mask ×
+`T` ∈ {4,8} × 8 seeds, plus `-R` and 20 k-transaction runs) with 0 failures;
+`behind=0` on every audited reclamation; `test_tx` 120/120, `test_ds` 207/207;
+TSan 0 races on five shapes and `test_ds`; ASan 0 errors/0 leaks on
+`bank`/`test_tx`/`test_ds`; UBSan 0 findings; `make check-diff` 21/21.
+
+**Why CI missed it twice over**: the shape, and the fact that reclamation only
+starts above 16 384 claimed slots while CI's largest scenario reached 9 600 — no
+seed ever ran a reclamation. `tools/diff_backends.sh` now runs `-M 16`, `-M 8`
+and `-R` at `-n 2000` for every backend (driver legs cost ~0.05 s), and the
+threshold reasoning is in the script's comment. Implementation_notes.md §5 was
+rewritten: it described a quiescence-point reclamation the code never had, and
+now documents both fold bounds and why the concurrent `BloomFilter::clear()` is
+sound only because of them. TODO.md records the two remaining gaps: the TLA+
+model abstracts reclamation away (so it cannot gate this class) and the fold
+scans the whole window under the commit lock.
+
+Also gave MVLog the deterministic gate it never had: `tests/backends/tm_impl`
+now builds it alongside the other 11 backends (9 of the 10 tests pass; the
+suite's `run` target, which CI already runs, picks it up automatically). Its one
+exclusion, `test_gc_reader`, is recorded with its reason — that test holds a
+transaction open while busy-waiting for other threads to commit, which is exactly
+the circular wait MVLog's ordered commit log documents as its head-of-line
+blocking cost. Adding the backend needed a per-backend exclusion mechanism, which
+the Makefile did not have; every backend's suite was re-run to confirm the shared
+run-recipe change is inert for the other 12 (all rc=0, no FAIL lines).

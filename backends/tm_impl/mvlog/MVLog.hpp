@@ -37,9 +37,12 @@
 // transaction's slot resolves, and only waiting gives a frozen snapshot).
 //
 // Reclamation: when the live window exceeds a threshold, the publisher folds
-// the folded-out prefix [g_wm, slot) back into g_mem (in slot order), advances
-// the watermark, then clears g_dirty.  Log entries form a ring (kLogSlots)
-// indexed by slot & kLogMask; a per-entry slot tag detects recycling.
+// the folded-out prefix [g_wm, slot] — its own entry included, last — back into
+// g_mem in slot order, advances the watermark, then clears g_dirty.  Folding
+// inclusive of the publisher's own slot is what keeps g_mem at the newest
+// committed value for every address, which the fast path reads directly.  Log
+// entries form a ring (kLogSlots) indexed by slot & kLogMask; a per-entry slot
+// tag detects recycling.
 //
 // The protocol is verified against the TLA+ model in docs/proofs/MVLog.tla
 // (821,655 states generated / 329,041 distinct, 0 errors).  See
@@ -160,6 +163,26 @@ static void setjmp(sigjmp_buf *buf) { jmpbuf = buf; }
 
 inline bool iseq(any_type_t a, any_type_t b) { return a.u8 == b.u8; }
 
+// Bytes occupied by a value of type `t` (0 for a type this STM does not version).
+inline unsigned value_size(ValueType t)
+{
+	switch (t) {
+	case ValueType::UINT8:
+		return 1;
+	case ValueType::UINT16:
+		return 2;
+	case ValueType::UINT32:
+	case ValueType::FLOAT:
+		return 4;
+	case ValueType::UINT64:
+	case ValueType::DOUBLE:
+	case ValueType::POINTER:
+		return 8;
+	default:
+		return 0;
+	}
+}
+
 // ── Index helpers ──────────────────────────────────────────────────
 inline uint64_t hash_addr(uint64_t a) { return stm::bloom_mix64(a); }
 
@@ -247,30 +270,13 @@ inline bool scan_write_entries(size_t n,
                                any_type_t &out,
                                GetT &&get)
 {
-	auto entrySize = [](ValueType t) -> unsigned {
-		switch (t) {
-		case ValueType::UINT8:
-			return 1;
-		case ValueType::UINT16:
-			return 2;
-		case ValueType::UINT32:
-		case ValueType::FLOAT:
-			return 4;
-		case ValueType::UINT64:
-		case ValueType::DOUBLE:
-		case ValueType::POINTER:
-			return 8;
-		default:
-			return 0;
-		}
-	};
-	unsigned rs = entrySize(sz);
+	auto rs = value_size(sz);
 
 	for (size_t i = 0; i < n; i++) {
 		auto [a, t, v] = get(i);
 		if (a != addr)
 			continue;
-		unsigned es = entrySize(t);
+		unsigned es = value_size(t);
 		if (es == rs && t == sz) {
 			out = v;
 			return true;
@@ -514,9 +520,30 @@ inline void commit()
 		index_insert(reinterpret_cast<uint64_t>(w.addr), (int64_t)slot);
 	}
 
-	// Reclamation: fold the folded-out prefix into g_mem, then rotate g_dirty.
-	if (slot - g_wm.load(std::memory_order_relaxed) > kReclaimThreshold) {
-		for (uint64_t s = w; s < slot; s++) {
+	// Reclamation: fold the out-of-window prefix into g_mem, then rotate g_dirty.
+	//
+	// Two bounds make the fold safe against the lock-free fast path, which reads
+	// g_mem as soon as the filter misses:
+	//
+	//   * Start at the watermark as of NOW, not the one snapshotted before the
+	//     predecessor wait.  g_wm only advances under the commit lock (which we
+	//     hold), so entries below it are already folded — re-folding them would
+	//     rewrite g_mem for addresses that are no longer dirty, i.e. addresses
+	//     concurrent readers are allowed to take straight from memory.
+	//   * Run THROUGH our own slot, inclusive.  Our write-through above already
+	//     put the newest value in g_mem; stopping at slot - 1 re-installed the
+	//     second-newest value over it, so g_mem ended up behind the newest commit
+	//     for every address this transaction wrote — and the g_dirty.clear()
+	//     right after it is exactly what exposes such a value to a reader.
+	//     Ascending slot order plus an inclusive end is what makes the last write
+	//     per address the newest commit's.
+	//
+	// Measured before this was fixed (drv_diff_ops -T 8 -M 16): the fold at slot
+	// 16405 rewrote a hot counter from 1388 back to 1001 and walked it forward to
+	// the second-newest value.  See docs/CORRECTNESS_FIXES.md §34.
+	uint64_t wm = g_wm.load(std::memory_order_relaxed);
+	if (slot - wm > kReclaimThreshold) {
+		for (uint64_t s = wm; s <= slot; s++) {
 			LogEntry *le = &g_log[s & kLogMask];
 			if (le->tag.load(std::memory_order_acquire) != (uint32_t)s) {
 				continue; // already folded by an earlier reclamation
@@ -529,6 +556,17 @@ inline void commit()
 				}
 			}
 		}
+#ifndef NDEBUG
+		// The invariant the fast path relies on: every address this commit wrote
+		// is back to its value in g_mem, because its entry is the last folded.
+		for (const WriteLogEntry &pw : tx->write_set) {
+			unsigned nb = value_size(pw.type);
+			uint64_t mask = (nb >= 8) ? ~0ULL : ((1ULL << (8 * nb)) - 1);
+			any_type_t mem = read_value_from_addr(pw.addr, pw.type);
+			TM_ASSERT((mem.u8 & mask) == (pw.new_val.u8 & mask),
+			          "reclamation rolled back a committed write");
+		}
+#endif
 		// Folded stores become visible to fast-path readers before the filter
 		// is cleared (release fence before the relaxed clear).
 		std::atomic_thread_fence(std::memory_order_release);
@@ -609,31 +647,14 @@ inline void write_word(Transaction *tx, void *addr, any_type_t val, ValueType sz
 	}
 #endif
 
-	auto typeSize = [](ValueType t) -> unsigned {
-		switch (t) {
-		case ValueType::UINT8:
-			return 1;
-		case ValueType::UINT16:
-			return 2;
-		case ValueType::UINT32:
-		case ValueType::FLOAT:
-			return 4;
-		case ValueType::UINT64:
-		case ValueType::DOUBLE:
-		case ValueType::POINTER:
-			return 8;
-		default:
-			return 0;
-		}
-	};
-	unsigned sz_bytes = typeSize(sz);
+	unsigned sz_bytes = value_size(sz);
 
 	// Scan from the end: update the most recent same-size entry, skip a
 	// write covered by a wider entry, otherwise append.
 	for (auto it = tx->write_set.rbegin(); it != tx->write_set.rend(); ++it) {
 		if (it->addr != addr)
 			continue;
-		unsigned es = typeSize(it->type);
+		unsigned es = value_size(it->type);
 		if (es == sz_bytes) {
 			it->new_val = val;
 			return;

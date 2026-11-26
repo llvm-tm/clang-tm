@@ -208,26 +208,63 @@ commits or aborts. ∎
 
 ## 5. Reclamation (log prefix → memory)
 
-The log grows forever; retired prefixes must eventually be folded back into
-`g_mem`:
+The log grows forever; out-of-window entries must eventually be folded back
+into `g_mem`. What `commit()` actually does (this replaced an earlier
+"quiescence point" sketch that the code never implemented):
 
-1. Reclaim a prefix only at a **quiescence point** (e.g. a thread-exit or a
-   barrier) where no in-flight transaction has a slot inside the prefix. This
-   is required so that a reader can never see a *too-new* `g_mem` value.
-2. For each entry in the prefix, write its `write_set` into `g_mem` (in slot
-   order), then advance the reclamation watermark.
-3. Rotate `g_dirty`: when the filter's popcount crosses a threshold, start a
-   fresh filter for the new generation and retire the old one; readers check
-   all active generations. Bloom filters cannot be cleared element-wise, so
-   generation rotation is the standard scheme.
+1. **Where.** Inline, at the end of `commit()`, when
+   `slot - g_wm > kReclaimThreshold`, while holding the commit lock. No
+   quiescence point exists in this protocol, and none is needed: the property
+   reclamation must preserve is about *addresses*, not slots (below).
+2. **Range.** `[g_wm, slot]` — from the watermark as of lock acquisition,
+   through the reclaimer's **own** entry, in ascending slot order. Both bounds
+   matter:
+   - *From the current watermark*: `g_wm` only advances under the commit lock,
+     so entries below it are already folded. Re-folding them would rewrite
+     `g_mem` for addresses whose dirty marks were cleared by that earlier
+     reclamation — i.e. addresses that concurrent readers are entitled to take
+     straight from memory.
+   - *Through our own slot*: our write-through already put the newest value in
+     `g_mem`. Folding only up to `slot - 1` re-installs the second-newest value
+     over it, so memory ends up **behind** the newest commit for every address
+     we wrote. Ascending order with an inclusive end is exactly what makes the
+     last write per address the newest commit's. Getting this wrong cost a real
+     lost-update bug: see `docs/CORRECTNESS_FIXES.md` §34.
+3. **Advance `g_wm`, then clear `g_dirty`** (both after a release fence on the
+   folded stores). Our own addresses are re-inserted afterwards, which is safe
+   only because the inclusive fold already restored them in memory. Either
+   order of those two stores is safe: a reader that sees the new watermark but
+   an old dirty bit just takes the slow path, where `resolve()` falls back to
+   `g_mem` for folded slots.
 
-**Fast-path invariant after reclamation.** If `addr ∉ g_dirty` then
-`g_mem[addr] = ReadValue(addr, S)` for every in-flight reader `S`, because the
-prefix was reclaimed only when no in-flight reader's slot was inside it.
+`stm::BloomFilter::clear()` is documented as safe only without concurrent
+readers, and MVLog does call it while readers are lock-free. That is sound here
+for one reason: the clear is the *last* store after every folded value is
+already in `g_mem` (release-fenced), and the fast path runs an acquire fence
+before loading from memory, so any reader that observes a cleared bit also
+observes every folded store. The scheme depends on that ordering absolutely —
+`g_dirty` is not a hint, and clearing it is only ever correct in lockstep with
+a fold that leaves memory at the newest committed value.
+
+**Fast-path invariant.** A reader may take a value from `g_mem` whenever
+`addr ∉ g_dirty`. Two cases, and each of the two bounds above protects one:
+
+- *During* the fold: every address it writes has a committed writer at a slot
+  ≥ `g_wm`, hence was inserted into `g_dirty` after the last clear and is still
+  there — so no reader is fast-pathing it, and the transient intermediate
+  values are unobservable.
+- *After* the fold: for every address, the last fold write was the newest
+  commit's, so `g_mem` holds the newest committed value and a clean miss is
+  exact (for addresses below `g_wm` this was established by the reclamation
+  that advanced the watermark to here).
+
+A debug build asserts the second case: after the fold, `g_mem` must equal this
+commit's value for every address it wrote.
 
 The core protocol in the TLA+ model abstracts reclamation (see §7); the model
 uses a no-reclamation `dirty` set, for which the fast path is correct by the
-same argument (a miss implies no committed writer).
+same argument (a miss implies no committed writer). That abstraction is why the
+§34 defect was outside what the model checks.
 
 ## 6. Relationship to prior work
 

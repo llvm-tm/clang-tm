@@ -179,8 +179,12 @@ jobs:
       - name: Run differential concurrency sweep
         run: |
           # Seed 1 deterministically catches the aliasing/width class these
-          # fixes addressed; the backends here include the three the driver
-          # caught bugs in (CSMV, JVSTM, GPU_STM_CPU) plus core references.
+          # fixes addressed; the backends here include every one the driver
+          # has caught a bug in (CSMV, JVSTM, GPU_STM_CPU, MVLOG) plus core references.
+          # tools/diff_backends.sh also runs single-op-class (-M) and per-thread
+          # partitioned (-R) shapes at enough slots to cross MVLog's reclamation
+          # threshold: the mixed shape at a smaller slot count passed right over
+          # the §34 lost update, and neither shape is reachable below that.
           if [ "${{ github.event_name }}" = "push" ]; then
             BACKENDS="TINYSTM NOREC NORECBF SWISSTM TL2 MVLOG SGL LEFTRIGHT XTM CSMV GPU_STM_CPU JVSTM" \
               tools/diff_backends.sh 1
@@ -195,7 +199,9 @@ jobs:
   # read_lock_interference, readall_write_interference, abba_deadlock,
   # subword_counters, plus the region-allocator tests. This is the gate that
   # catches version-store aliasing and sub-word clobbering without relying on
-  # the stochastic concurrency driver. All 11 backends pass locally.
+  # the stochastic concurrency driver. All 12 backends pass locally (MVLog joins
+  # it here; its one exclusion, test_gc_reader, is recorded with its reason in
+  # tests/backends/tm_impl/Makefile).
   backend-unit:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: ubuntu-22.04

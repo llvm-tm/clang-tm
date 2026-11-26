@@ -15,7 +15,18 @@ cd "$(dirname "$0")/.." || exit 1
 SEEDS="${*:-1 2 3}"
 BACKENDS="${BACKENDS:-TINYSTM WBETL WT NOREC NORECBF SWISSTM TL2 TSC_TM MVLOG SGL LEFTRIGHT ROMULUS XTM SPHT TSXSGL GPU_STM_CPU CSMV JVSTM GACCO CALVIN ACCELTL2}"
 # -T threads -n txns/thread per scenario (quick CI set; add more locally)
-SCENARIOS=("-T 4 -n 1500" "-T 8 -n 1200")
+#
+# The -n 2000 -T 8 legs are deliberately at least 16 384 slots (commits +
+# aborts): MVLog only reclaims its log once the live window passes that, so any
+# smaller run never executes a reclamation at all — and the fold bug in
+# docs/CORRECTNESS_FIXES.md §34 is only reachable there.
+#   -M 16  every transaction writes the same scratch counter: maximum single-address
+#          contention, which is what turned the fold bug into a visible lost update.
+#   -M 8   read-own-write path (re-read of a just-written object, two widths).
+#   -R     objects partitioned per thread, so sets are disjoint by construction and
+#          any violation is aliasing rather than a scheduling accident.
+SCENARIOS=("-T 4 -n 1500" "-T 8 -n 1200" "-T 8 -n 2000 -M 16" "-T 8 -n 2000 -M 8"
+          "-T 8 -n 2000 -R")
 
 fails=""; builds=""; passed=""
 for be in $BACKENDS; do

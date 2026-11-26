@@ -227,7 +227,7 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 | race-checker | yes | Run `tm-race-checker` pass over every `.bc` produced by `make plugin` |
 | cross-backend | yes (gated by event) | Build + test C++ backends (TINYSTM/NOREC/TL2 on PRs, 13 on push to main) |
 | diff-concurrency | yes | `tools/diff_backends.sh`: the T1 differential driver over every backend, plus the width-clobber / bucket-alias repros |
-| backend-unit | yes | `tests/backends/tm_impl` per-backend unit suite (matrix) |
+| backend-unit | yes | `tests/backends/tm_impl` deterministic per-backend unit suite (12 backends × 10 tests, built at `-O0 -g` without `NDEBUG` so runtime assertions are live; per-backend exclusions carry their reason in the Makefile) |
 | stale-check | yes | Assert legacy directories (`llvm_tm_plugin`, `expli-benchmarks`, `plugin-benchmarks`, `rust_tm_api`) are gone |
 | tla-smoke | yes | Blocking 3-model smoke (`SGL`, `NOrec-smoke`, `TinySTM_WBCTL`), 60 s/model budget |
 | lint | yes | `clang-format-22`, `cargo fmt --check`, `clippy -D warnings` |
