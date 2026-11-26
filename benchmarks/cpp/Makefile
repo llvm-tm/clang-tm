@@ -407,7 +407,15 @@ bin:
 # `make clean` were the only workarounds). The stamp file is regenerated
 # whenever BACKEND changes, and since every link rule depends on it, the
 # switch now forces a correct relink.
-BACKEND_STAMP := bin/.backend-$(BACKEND)
+# The stamp name also encodes SANITIZE and COVERAGE, because those change the
+# compile/link flags without touching any prerequisite file either: after
+#   make bin/drv_diff_ops BACKEND=TL2 SANITIZE=address
+# a plain   make bin/drv_diff_ops BACKEND=TL2   would relink nothing and run the
+# ASan binary as the clean one — and the reverse mistake (a "sanitizer sweep"
+# that silently reuses the unsanitized binary and reports it green) is exactly
+# how sanitizer sweeps lie. EXTRA_CXXFLAGS is deliberately not encoded (free-form
+# text is a poor file name), so builds that add defines still need -B.
+BACKEND_STAMP := bin/.backend-$(BACKEND)-san$(SANITIZE)-$(if $(COVERAGE),cov1,cov0)
 
 $(BACKEND_STAMP):
 	@mkdir -p bin
