@@ -792,6 +792,13 @@ public:
 						held_guard[idx2] = false;
 					}
 				}
+				// Log the abort: TX_BEGIN has no other end on this route.  Without
+				// it, tools/stm_bug_tool/invariant_checker.py's lifecycle check sees
+				// a TX_BEGIN that never completes and reports a lost transaction
+				// (measured: 5 false criticals on a -T 4 TL2 run whose driver oracles
+				// were all zero, and 0 TX_ABORT events in 19 210 events of a log
+				// where every other aborting backend logs them).
+				TM_EVENT(TX_ABORT, (word_t)tx, tx->start_version);
 				tx->active = false;
 				tx->aborted = true;
 				return false;
@@ -831,6 +838,8 @@ public:
 						held_guard[idx] = false;
 					}
 				}
+				// Same reason as the guard-acquire abort above.
+				TM_EVENT(TX_ABORT, (word_t)tx, tx->start_version);
 				tx->active = false;
 				tx->aborted = true;
 				return false;

@@ -21,7 +21,6 @@ there are only warnings), 0 otherwise, so it can gate CI.
 """
 
 import argparse
-import re
 import sys
 
 from event_parser import (
@@ -33,46 +32,63 @@ from event_parser import (
 # ── Invariant 1: Complete TX Lifecycle ─────────────────────────────────
 
 def is_ring_wrapped(parsed: dict) -> bool:
-    """Return True if the ring buffer wrapped (events before dump_start lost)."""
-    return parsed.get("dump_start", 0) > 0
+    """True if ANY dump in the log wrapped (events before dump_start are lost).
+
+    A log may contain several dumps and each has its own wrap state, so a single
+    dump_start is not enough: with the driver's per-worker dumps, Wave A's four
+    dumps had wrapped (from #1630 and later) while the last dump in the same file
+    was pristine, and reading only the last one made the wrapped tails look like
+    complete histories.
+    """
+    starts = parsed.get("dump_starts") or [parsed.get("dump_start", 0)]
+    return any(s > 0 for s in starts)
 
 
 def check_complete_tx_lifecycle(parsed: dict) -> list:
-    """Every TX_BEGIN must end with COMMIT_SUCCESS or TX_ABORT.
+    """Every TX_BEGIN must end with COMMIT_SUCCESS or TX_ABORT, per thread.
 
     When the ring buffer wraps, orphan ends at the start of the log
     are expected (TX_BEGIN was in the missing portion).
+
+    Pairing is per thread id on purpose. The driver dumps one ring per worker and
+    the checker is routinely pointed at a file with several dumps concatenated, so
+    pairing in one global stream pairs thread A's BEGIN with thread B's end and
+    then reports every leftover as a violation: measured on a TL2 run whose driver
+    oracles were all zero, the global pairing produced 9 lifecycle criticals across
+    4 threads' dumps where the same shape run at -T 1 produced none.
     """
     violations = []
-    events = parsed["events"]
     wrapped = is_ring_wrapped(parsed)
 
-    # Trace TX begin → end pairs
-    tx_starts = []
-    for ev in events:
-        if ev["type"] == "TX_BEGIN":
-            tx_starts.append(ev)
-        elif ev["type"] in ("COMMIT_SUCCESS", "TX_ABORT"):
-            if tx_starts:
-                tx_starts.pop()
-            elif not wrapped:
-                # Only flag orphan end when we know we have the full history
-                violations.append({
-                    "invariant": "complete_tx_lifecycle",
-                    "severity": "CRITICAL",
-                    "description": f"Orphan end ({ev['type']}) without matching TX_BEGIN",
-                    "events": [ev],
-                })
+    for tid, thread_events in group_by_thread(parsed["events"]).items():
+        # Trace this thread's begin -> end pairs
+        tx_starts = []
+        for ev in thread_events:
+            if ev["type"] == "TX_BEGIN":
+                tx_starts.append(ev)
+            elif ev["type"] in ("COMMIT_SUCCESS", "TX_ABORT"):
+                if tx_starts:
+                    tx_starts.pop()
+                elif not wrapped:
+                    # Only flag orphan ends when we know we have the full history
+                    violations.append({
+                        "invariant": "complete_tx_lifecycle",
+                        "severity": "CRITICAL",
+                        "description": f"Orphan end ({ev['type']}) without matching "
+                                       f"TX_BEGIN (thread {tid})",
+                        "events": [ev],
+                    })
 
-    # Any remaining TX_BEGINs without end
-    for ev in tx_starts:
-        # This is legitimate — the thread crashed before the TX completed
-        violations.append({
-            "invariant": "complete_tx_lifecycle",
-            "severity": "CRITICAL",
-            "description": f"TX_BEGIN (tx={ev['data']}) without matching end",
-            "events": [ev],
-        })
+        # Any remaining TX_BEGINs without end
+        for ev in tx_starts:
+            # This is legitimate — the thread crashed before the TX completed
+            violations.append({
+                "invariant": "complete_tx_lifecycle",
+                "severity": "CRITICAL",
+                "description": f"TX_BEGIN (tx={ev['data']}) without matching end "
+                               f"(thread {tid})",
+                "events": [ev],
+            })
 
     return violations
 
@@ -80,58 +96,70 @@ def check_complete_tx_lifecycle(parsed: dict) -> list:
 # ── Invariant 2: Lock Discipline ──────────────────────────────────────
 
 def check_lock_discipline(parsed: dict) -> list:
-    """Every COMMIT_LOCK_ACQUIRE must have matching LOCK_RELEASE.
+    """Every COMMIT_LOCK_ACQUIRE must have the same thread's matching LOCK_RELEASE.
 
     When the ring buffer wraps, initial events may have lock acquires
     whose release was in the missing portion — skip release-less acquires
     that are within the first TX in the window.
+
+    Like the lifecycle check, this pairs per thread id. Locks are shared, but the
+    invariant being stated here is "a thread does not acquire a lock and forget to
+    release it"; in a merged multi-worker log a global (address-keyed) outstanding
+    set lets thread B's acquire collide with thread A's still-held lock and reports
+    both a double acquire and a release with no acquire. Measured on the same zero-
+    violation TL2 run: 167 findings across the dumps, 0 on the -T 1 run.
+    Cross-thread mutual exclusion (two threads holding one lock at once) is a
+    different property, and no invariant in this file checks it —
+    check_no_orphan_locks only counts each thread's own acquire/release balance.
     """
     violations = []
-    events = parsed["events"]
     wrapped = is_ring_wrapped(parsed)
 
-    locks_outstanding = {}  # lock_addr -> acquire_event
-    seen_first_tx_end = False
+    for tid, thread_events in group_by_thread(parsed["events"]).items():
+        locks_outstanding = {}  # lock_addr -> acquire_event, this thread's holds
+        seen_first_tx_end = False
 
-    for ev in events:
-        if ev["type"] == "COMMIT_LOCK_ACQUIRE":
-            lock_addr = ev["addr1"]
-            if lock_addr in locks_outstanding:
-                violations.append({
-                    "invariant": "lock_discipline",
-                    "severity": "WARNING",
-                    "description": f"Double lock acquire at lock=0x{lock_addr:x} "
-                                   f"(tx_id={ev['data']})",
-                    "events": [locks_outstanding[lock_addr], ev],
-                })
-            locks_outstanding[lock_addr] = ev
-
-        elif ev["type"] == "LOCK_RELEASE":
-            lock_addr = ev["addr1"]
-            if lock_addr not in locks_outstanding:
-                # If ring wrapped, release may match an acquire in the lost portion
-                if not wrapped or seen_first_tx_end:
+        for ev in thread_events:
+            if ev["type"] == "COMMIT_LOCK_ACQUIRE":
+                lock_addr = ev["addr1"]
+                if lock_addr in locks_outstanding:
                     violations.append({
                         "invariant": "lock_discipline",
-                        "severity": "CRITICAL",
-                        "description": f"LOCK_RELEASE without matching acquire at lock=0x{lock_addr:x}",
-                        "events": [ev],
+                        "severity": "WARNING",
+                        "description": f"Double lock acquire at lock=0x{lock_addr:x} "
+                                       f"(tx_id={ev['data']}, thread {tid})",
+                        "events": [locks_outstanding[lock_addr], ev],
                     })
-            else:
-                del locks_outstanding[lock_addr]
+                locks_outstanding[lock_addr] = ev
 
-        elif ev["type"] in ("COMMIT_SUCCESS", "TX_ABORT") and not seen_first_tx_end:
-            seen_first_tx_end = True  # first TX in window completed normally
+            elif ev["type"] == "LOCK_RELEASE":
+                lock_addr = ev["addr1"]
+                if lock_addr not in locks_outstanding:
+                    # If ring wrapped, release may match an acquire in the lost portion
+                    if not wrapped or seen_first_tx_end:
+                        violations.append({
+                            "invariant": "lock_discipline",
+                            "severity": "CRITICAL",
+                            "description": f"LOCK_RELEASE without matching acquire at "
+                                           f"lock=0x{lock_addr:x} (thread {tid})",
+                            "events": [ev],
+                        })
+                else:
+                    del locks_outstanding[lock_addr]
 
-    # Any locks still outstanding at end of log (if no SIGSEGV)
-    if not sigsegv_detected(parsed):
-        for lock_addr, acquire_ev in locks_outstanding.items():
-            violations.append({
-                "invariant": "lock_discipline",
-                "severity": "CRITICAL",
-                "description": f"Lock never released at lock=0x{lock_addr:x}",
-                "events": [acquire_ev],
-            })
+            elif ev["type"] in ("COMMIT_SUCCESS", "TX_ABORT") and not seen_first_tx_end:
+                seen_first_tx_end = True  # first TX in window completed normally
+
+        # Any locks this thread still holds at the end of the log (if no SIGSEGV)
+        if not sigsegv_detected(parsed):
+            for lock_addr, acquire_ev in locks_outstanding.items():
+                violations.append({
+                    "invariant": "lock_discipline",
+                    "severity": "CRITICAL",
+                    "description": f"Lock never released at lock=0x{lock_addr:x} "
+                                   f"(thread {tid})",
+                    "events": [acquire_ev],
+                })
 
     return violations
 
@@ -981,11 +1009,6 @@ def main(argv=None) -> int:
     if args.baseline:
         parsed["baseline"] = load_baseline(args.baseline)
 
-    # The driver dumps one ring per worker, so a multi-threaded run concatenates
-    # several dumps. The lifecycle and lock-discipline checks pair events in one
-    # global stream, so interleaved concurrent threads pair them wrongly.
-    dumps = text.count("--- Event log (")
-
     invariants = ALL_INVARIANTS
     if args.events:
         want = [s.strip().lower() for s in args.events.split(",") if s.strip()]
@@ -1001,9 +1024,8 @@ def main(argv=None) -> int:
     for v in res["violations"]:
         per_inv[v["invariant"]] = per_inv.get(v["invariant"], 0) + 1
 
-    wrapped = is_ring_wrapped(parsed) or any(
-        int(m.group(2)) > 0 for m in re.finditer(r"--- Event log \((\d+) entries, dumping from #(\d+)\) ---", text)
-    )
+    wrapped = is_ring_wrapped(parsed)
+    dumps = len(parsed.get("dump_starts", []))
     print(f"log: {args.log}")
     print(
         f"events: {len(parsed['events'])} parsed"
@@ -1020,10 +1042,9 @@ def main(argv=None) -> int:
     if dumps > 1 and not args.quiet:
         print(
             f"note: {dumps} per-thread dumps are concatenated here. Complete TX"
-            "\n      lifecycle and Lock discipline pair events in one global stream,"
-            "\n      so dumps from CONCURRENTLY running threads interleave and those"
-            "\n      two checks report false violations. Use a single-threaded run"
-            "\n      (or fix the checks to pair per thread id)."
+            "\n      lifecycle and Lock discipline pair events per thread id, so the"
+            "\n      merge is safe; the thread ids are the worker threads' handles and"
+            "\n      a thread that ran in an earlier wave can reuse one."
         )
 
     if not args.quiet:

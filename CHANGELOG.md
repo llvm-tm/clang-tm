@@ -3790,3 +3790,42 @@ backends, and its job comment, `DEVELOPER_GUIDE.md`, `IMPLEMENTATIONS.md` §19, 
 backend's `STATUS.md` and `CORRECTNESS_FIXES.md`'s known-issues rows were rewritten to
 match — §35's own "what is still not right" block was kept but retitled as what that
 commit shipped, since its numbers are the baseline §37 is measured against.
+
+## Session 2026-11-26 (morning, third block) — the event-log checker stopped inventing lost transactions (§38)
+
+`tools/stm_bug_tool/invariant_checker.py` paired `TX_BEGIN` with its end in one
+global stream even though the driver dumps one ring per worker, so any `-T 4` log
+produced false criticals — the reason both its README and `DEBUGGING_BACKENDS.md`
+told people to run `-T 1`, which is also exactly what hid the real findings. Both
+pairing checks now go through `group_by_thread`, and `parse_event_log` returns
+`dump_starts` so *every* dump's wrap state is known: a driver log's first four dumps
+had wrapped (`from #1630` and later) while its last was pristine, and reading only the
+last header made the truncated tails look like complete histories. Measured on the
+52-dump log that exposed it: lock discipline 167 findings → 0, lifecycle 9 → 5.
+
+Those last 5 were not a checker bug, and that was the interesting part: `grep` for
+`TX_ABORT` in 19 210 events of a contended TL2 log returned **0**, because
+`commit()`'s two conflict-abort routes (guard-acquire failure, read-set validation
+failure) return false without logging, while the only `TX_ABORT` sites were inside
+`#ifdef TM_ACCEL_GPU` and in an `abort()` this route never reaches. Every other
+aborting backend logs its abort at its own abort site. So a clean TL2 run (all driver
+oracles 0) looked like it was losing transactions. Logging the abort at both routes
+(§38) took lifecycle criticals from 130, 317 and 372 at three shapes to **0** at identical
+commit totals, and — the timing-independent evidence — all 48 dumps holding a complete
+history now balance `TX_BEGIN` against ends exactly, with only the ±1 that ring
+truncation explains left in the four wrapped Wave-A windows; before, those windows were
+out by +32, +10, +9, +4, +89, +80 and +89.
+
+Logging aborts also exposed three checker/backend mismatches that I recorded in
+`TODO.md` rather than smoothed over, with numbers: `Abort causality` fires 96, 316 and 263
+times on clean TL2 runs because its causal-event set lists another backend's event
+names; `Version ordering` calls TL2's by-design newer-version reads stale (14–32
+criticals per log, pre-existing on both sources); and a `-T 4 -n 300` NOrec log
+produces 3 081 criticals (1 250 lock discipline, 1 254 the known stack-misclassification
+of the mmap'd TM region). That is why no CI job gates on the checker yet, and the README
+now says so explicitly instead of implying a green run means invariants hold.
+
+TL2 gates on the changed source: `test_tx` 120/120, `test_ds` 207/207,
+`run-tl2` PASS, `make check-fast`, `make fmt-check`. Also worth remembering: my
+binary-identity grep `\bg_[a-z_]*hooks\b` silently matched nothing for TL2 because
+`tl2` contains a digit — the class needs `[a-z0-9_]`.

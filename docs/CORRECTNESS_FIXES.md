@@ -1575,6 +1575,77 @@ that half is the argument above, not a red test that went green. The measurable 
 is that GPUTX's accesses stopped being undefined behaviour, which is why it joined
 `tsan-gate` (all 22 C++ backends gated now) instead of being excepted from it.
 
+## 38. TL2 logged no abort on its conflict routes, so a clean contended run looked like it was losing transactions (2026-11-26) ✅
+
+**Root cause.** Two things had to be wrong at once for this to be invisible, which is
+why it survived the tool being written:
+
+- `backends/tm_impl/tl2/tl2.hpp`'s `commit()` returns false on two conflict routes —
+  guard-acquire failure (Step 3) and read-set validation failure (Step 5) — setting
+  `aborted = true` without emitting `TM_EVENT(TX_ABORT, …)`. The only `TX_ABORT`
+  sites were the accelerator pre-validation path, which is inside `#ifdef
+  TM_ACCEL_GPU`, and `abort()`, which this route never reaches. Every other
+  aborting backend in the tree (NOrec, NORECBF, MVLog, TinySTM ×3, SwissTM, TSC_TM)
+  logs the abort at its own abort site; TL2 was the outlier.
+- `tools/stm_bug_tool/invariant_checker.py` paired `TX_BEGIN` with its end in **one
+  global stream**, although the driver dumps one ring per worker. Pointed at a
+  multi-worker log it paired thread A's begin with thread B's end and reported every
+  leftover as a violation.
+
+**Effect.** Not a runtime fault: the driver's own oracles (`v_double_read`,
+`v_range`, `v_readown`, `v_ptr`, `quiesce_viol`, `alloc_viol`) were 0 in every run
+below. It is a diagnosis failure — `Complete TX lifecycle` reported `CRITICAL`
+"lost transaction" findings that were pure instrumentation gaps, on the backend a
+debugger is most likely to point the checker at first.
+
+**Fix.** Emit `TM_EVENT(TX_ABORT, (word_t)tx, tx->start_version)` at both `commit()`
+abort routes (a no-op unless built with `-DTM_EVENT_LOG`, on a path already returning
+failure, into the thread's own ring — no control flow or lock interaction). In the
+checker: pair `check_complete_tx_lifecycle` and `check_lock_discipline` per thread id
+via `group_by_thread`, and track **every** dump's wrap offset (`parse_event_log` now
+returns `dump_starts`) instead of only the last header's — a driver log's first four
+dumps had wrapped (`from #1630` and later) while its last was pristine, and reading
+only the last made the truncated tails look like complete histories.
+
+**Verification.** Same shapes, same seeds, event-log builds
+(`EXTRA_CXXFLAGS=-DTM_EVENT_LOG`, `DRV_EVENT_DUMP=1`, binary identity `g_tl2_hooks`),
+HEAD source against the fixed source:
+
+| shape | source | `TX_ABORT` events | lifecycle criticals | driver oracles |
+|---|---|---|---|---|
+| `-S 1 -T 4 -n 200` | HEAD | 0 | 130 | all 0 |
+| `-S 1 -T 4 -n 200` | fixed | 109 | **0** | all 0 |
+| `-S 2 -T 4 -n 1000` | HEAD | 0 | 317 | all 0 |
+| `-S 2 -T 4 -n 1000` | fixed | 352 | **0** | all 0 |
+| `-S 3 -T 4 -n 1000` | HEAD | 0 | 372 | all 0 |
+| `-S 3 -T 4 -n 1000` | fixed | 283 | **0** | all 0 |
+
+Commit totals are identical in each pair (1144, then 4344 twice); the abort *counts*
+differ (157 vs 119, 3144 vs 3749, 2733 vs 2753) partly because the extra ring writes
+perturb timing and partly because the count swings run to run at these shapes (a re-run
+of the fixed `-S 1 -T 4 -n 200` shape had 0 aborts and no wrapped ring at all). Counts
+are therefore not the evidence — per-window transaction balance is, and it holds on
+both `-T 4 -n 1000` seeds: **all 48 dumps that hold a complete history (52 minus the 4
+wrapped Wave-A windows) have `TX_BEGIN` count equal to end count**, and the residue is
+±1 confined to the wrapped windows (orphan ends where the oldest `TX_BEGIN` was
+overwritten, plus in one log a single extra begin where a thread handle is reused across
+waves). With HEAD's source the same logs carry imbalances of +32, +56, +70, +78, +89,
++133 instead. On the original 52-dump log that motivated this, lock discipline went 167
+findings → 0 and lifecycle 9 → 5, the five being the unlogged aborts this section fixes.
+
+Backend gates on the same source: `test_tx` 120/120, `test_ds` 207/207,
+`make -C tests/backends/tm_impl run-tl2` PASS, `make check-fast`, `make fmt-check`.
+
+**What this does not fix.** Logging aborts made two other mismatches visible, and
+they are recorded in `TODO.md` rather than smoothed over: `Abort causality` now fires
+on TL2 (96, 316 and 263 warnings at the three shapes above) because its causal-event
+set lists `READ_VERSION_CHECK`/`GAP_CHECK`/`WRITE_LOCK_ACQUIRE` and TL2's conflict
+evidence is `COMMIT_LOCK_ACQUIRE`; `Version ordering` reports stale reads on clean TL2
+(14–41 per log, pre-existing — TL2 validates every read-set entry at commit, which is
+what the check's own docstring calls `extend()`); and a `-T 4 -n 300` NOrec log
+produces 3 081 criticals, 1 250 of them lock discipline. The checker is a diagnostic
+until those are reconciled, not a CI gate.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

@@ -58,7 +58,8 @@ def parse_event_log(text: str) -> dict:
             "events": [list of event dicts],
             "sigsegv_addr": str or None,
             "total_entries": int,
-            "dump_start": int,
+            "dump_start": int,          # the LAST dump's wrap offset
+            "dump_starts": [int, ...],  # one per dump header in the log
             "invariant_fail": bool,
             "invariant_result": str or None
         }
@@ -68,6 +69,12 @@ def parse_event_log(text: str) -> dict:
         "sigsegv_addr": None,
         "total_entries": 0,
         "dump_start": 0,
+        # One entry per "--- Event log (N entries, dumping from #M) ---" header.
+        # A log can hold several dumps (the driver dumps one ring per worker, and
+        # every wave of workers dumps its own), each with its OWN wrap state:
+        # keeping only the last made a log whose FIRST dumps wrapped look
+        # complete, which is the opposite of what the checks need.
+        "dump_starts": [],
         "invariant_fail": False,
         "invariant_result": None,
     }
@@ -100,6 +107,7 @@ def parse_event_log(text: str) -> dict:
         if m:
             result["total_entries"] = int(m.group(1))
             result["dump_start"] = int(m.group(2))
+            result["dump_starts"].append(int(m.group(2)))
             in_log = True
             continue
 

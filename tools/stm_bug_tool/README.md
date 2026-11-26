@@ -25,8 +25,8 @@ severity each violation is reported at:
 
 | Invariant | What it enforces |
 |-----------|------------------|
-| Complete TX lifecycle | Every `TX_BEGIN` ends in `COMMIT_SUCCESS` or `TX_ABORT`; an end without a begin is CRITICAL |
-| Lock discipline | Every `COMMIT_LOCK_ACQUIRE` has a matching `LOCK_RELEASE` |
+| Complete TX lifecycle | Per thread id: every `TX_BEGIN` ends in `COMMIT_SUCCESS` or `TX_ABORT`; an end without a begin is CRITICAL |
+| Lock discipline | Per thread id: every `COMMIT_LOCK_ACQUIRE` has a matching `LOCK_RELEASE` from the same thread |
 | Abort causality | A `TX_ABORT` is preceded by a causal event (version/gap/lock failure) — WARNING: backends abort for reasons not all logged |
 | No orphan locks | Locks held at the end of the log (or at a `SIGSEGV`) without release |
 | Gap check outcome | Every `GAP_CHECK` is followed by `TX_ABORT` or a matching success path |
@@ -80,12 +80,34 @@ Note the `2>`: the logger writes to stderr, so the log and the program's own
 stdout must not be conflated. `EXTRA_CXXFLAGS` adds flags without replacing the
 Makefile's own (`CXXFLAGS=` would drop the `-I` paths).
 
-**Run it single-threaded** (`-T 1`) until the lifecycle and lock-discipline checks
-pair events per thread id. They pair in one global stream, so when dumps from
-concurrently running threads are interleaved — which is what `-T 4` and above
-produces — they report false `CRITICAL` findings (measured: a TL2 run with all
-driver oracles zero produced 93 of them across 52 dumps, while the same shape at
-`-T 1` produced none). The checker says when a log contains more than one dump.
+**Multi-worker logs are usable for the two pairing checks.** `Complete TX
+lifecycle` and `Lock discipline` pair events **per thread id**. They used to pair
+in one global stream, so a log with dumps from concurrently running threads
+interleaved them and reported false `CRITICAL` findings (measured: 93 across 52
+dumps on a TL2 `-T 4` run whose driver oracles were all zero, 0 on the same shape
+at `-T 1`). Pairing per thread id takes that to 0 for lock discipline, and the
+remaining findings were then traceable to something else — see the next paragraph.
+The checker still tells you when a log holds more than one dump, and per-dump wrap
+state is tracked for every dump in the file, not just the last one.
+
+**What a lifecycle finding really means.** Those two checks assert what the *log*
+says, so a backend that does not log an abort produces a `TX_BEGIN` with no end,
+which is indistinguishable from a lost transaction. TL2's `commit()` logged nothing
+on its two conflict-abort routes (guard-acquire failure and read-set validation
+failure), so a contended TL2 run reported 130 and 317 lifecycle criticals at two
+shapes with zero real violations, and 0 `TX_ABORT` events in 19 210 events of a log
+in which every other aborting backend logs them. Fixed in
+`docs/CORRECTNESS_FIXES.md` §38, which also records the A/B (130 → 0 and 317 → 0 at
+identical commit counts). Before trusting a lifecycle `CRITICAL` from an unfamiliar
+backend, count its `TX_ABORT` events against the driver's own `aborts=` line.
+
+**Not every invariant is backend-neutral yet.** A `-T 4 -n 300` NOrec log (built the
+same way) currently produces 3 081 `CRITICAL`s — 1 250 lock-discipline, 1 254
+address-validity, 581 version-ordering — and a clean TL2 log produces `Abort
+causality` warnings (96 and 316 at the two shapes above) because that check's causal
+event set does not include the conflict evidence TL2 logs. These are unreconciled
+checker/backend vocabulary mismatches, measured and listed in `TODO.md`; the checker
+is a diagnostic tool, not a CI gate, until each is settled.
 
 
 ## Usage

@@ -43,9 +43,12 @@ make -C tests/backends clean all CXXFLAGS="-DTM_EVENT_LOG -UNDEBUG"
   python3 tools/stm_bug_tool/invariant_checker.py --log /tmp/events.txt   # exit 1 on CRITICAL
   ```
 
-  Run it `-T 1` for now: the lifecycle and lock-discipline checks pair events in
-  one global stream, so interleaved concurrent dumps yield false positives (see
-  `tools/stm_bug_tool/README.md`).
+  The lifecycle and lock-discipline checks pair events per thread id, so a `-T 4`
+  dump is fine (they used to pair in one global stream and produce false positives;
+  see `tools/stm_bug_tool/README.md`). What a lifecycle `CRITICAL` needs to be
+  believed is that the backend logs its aborts — `grep -c ' TX_ABORT '` the log and
+  compare with the driver's `aborts=` line (TL2's `commit()` logged none of its two
+  conflict-abort routes until `docs/CORRECTNESS_FIXES.md` §38).
 
 The logger records `addr1`/`addr2`/`data` per event, so you can confirm the
 exact addresses reaching the tracking path (and their versions).

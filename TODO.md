@@ -335,7 +335,7 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   `x86-tsx-validation.md` are tick-capped partial samples — see
   `gem5_sim/docs/x86-tsx-real-validation.md` §2.
 
-### Event-log invariant checker: runnable now, but its pairing is single-stream (P2, opened 2026-11-26)
+### Event-log invariant checker: pairing fixed (§38); per-backend event vocabularies still open (P2, opened 2026-11-26)
 
 `tools/stm_bug_tool/invariant_checker.py` implements 14 checks and had **no
 command-line entry point at all** — no `__main__`, no argparse — so the usage its
@@ -354,20 +354,46 @@ end to end: TL2, `-T 1 -n 300`, 5 806 events → 0 critical, rc 0; a hand-made l
 with an orphan commit and an unmatched `TX_BEGIN` → 3 critical, rc 1 (so the gate
 is not vacuous).
 
-Two things left, both measured today:
+What was left has one half done and three new gaps measured (P2, opened 2026-11-26):
 
-- **Pair the lifecycle and lock-discipline checks per thread id.** They pair in
-  one global stream, so a log containing dumps from concurrently running threads
-  produces false criticals: a TL2 run whose driver oracles were all zero reported
-  93 criticals + 87 warnings across 52 dumps, and the identical shape at `-T 1`
-  reported none. `group_by_thread()` is already imported and unused — use it in
-  `check_complete_tx_lifecycle` and `check_lock_discipline`, then wire a nightly
-  job (`-T 1` today, `-T 4+` after the fix). The CLI currently warns when a log
-  holds more than one dump, which is the stopgap, not the fix.
+- ~~**Pair the lifecycle and lock-discipline checks per thread id.**~~ → **RESOLVED
+  same day (§38).** Both checks now pair via `group_by_thread`, and
+  `parse_event_log` returns `dump_starts` so every dump's wrap state is known instead
+  of just the last header's. Measured on the log that exposed it (TL2, 52 dumps,
+  driver oracles all zero): lock discipline 167 findings → **0**, lifecycle 9 → 5.
+  The remaining 5 were not a checker bug: TL2's `commit()` logged no `TX_ABORT` on
+  either conflict route, so those transactions genuinely had no end in the log — fixed
+  in §38, which takes the two shapes it measured from 130 and 317 lifecycle criticals
+  to **0** and makes every complete-history dump balance `TX_BEGIN` against ends
+  exactly. A `-T 1` log had hidden all of this, which is why the README and
+  `docs/DEBUGGING_BACKENDS.md` no longer recommend `-T 1` as a workaround.
+- **`Abort causality` does not know TL2's vocabulary.** Now that aborts are logged it
+  fires on clean TL2 runs: 96 warnings at `-S 1 -T 4 -n 200`, 316 at
+  `-S 2 -T 4 -n 1000` and 263 at `-S 3 -T 4 -n 1000`, because `ABORT_CAUSAL_EVENTS` is
+  `{READ_VERSION_CHECK, GAP_CHECK, WRITE_LOCK_ACQUIRE}` and TL2's conflict evidence is
+  a failed `COMMIT_LOCK_ACQUIRE` (which logs nothing on failure) or a read-set version
+  mismatch (also silent). Either TL2 logs the conflict reason at those two sites, or
+  the check learns that the set is per-backend. Do not just widen the set: on the
+  backends it was written for, it is a real check.
+- **`Version ordering` calls TL2's normal behaviour a stale read.** 14–41
+  `CRITICAL`s per clean TL2 log, pre-existing (§38's table shows it on both sources):
+  the check flags `READ_LOCK_ACQUIRE` version > `TX_BEGIN` start version, but TL2
+  validates *every* read-set entry at commit (its Step 5 comment says so), which is
+  the `extend()` the check's own docstring describes. It needs to become
+  backend-conditional — TL2 reads with a newer version by design, TinySTM-style
+  backends must not.
+- **A `-T 4` NOrec log produces 3 081 criticals** (`-S 3 -n 300`, event-log build,
+  same recipe): 1 250 lock discipline, 1 254 address validity, 581 version ordering,
+  24 abort causality, 4 orphan locks. NOrec commits under one global version lock, so
+  an address-keyed per-thread lock ledger probably does not describe it at all
+  (acquire on one thread, release accounted elsewhere). Until this is understood the
+  checker stays a diagnostic tool, not a nightly/PR gate — that is why no CI job runs
+  it.
 - **`check_address_validity` misclassifies the TM region as stack.** It flagged
   5 218 events / 152 addresses as "stack" for pointers in the mmap'd region
   (`0x7f…` range, region base + 0x1000). Harmless as a WARNING, but it buries real
-  findings; classify against the region bounds `tm_region_allocator` knows.
+  findings; classify against the region bounds `tm_region_allocator` knows. It is the
+  1 254-finding component of the NOrec number above too.
 
 ### GPUTX lost committed writes as thread count rose — RESOLVED (found & fixed 2026-11-26, §35)
 
