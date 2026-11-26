@@ -127,7 +127,7 @@ memory-ordering / fences.
 
 ---
 
-## 4. ThreadSanitizer sweeps (`SANITIZE=thread`)
+## 4. Sanitizer sweeps (`SANITIZE=thread|address|undefined`)
 
 Every backend builds and runs under `-fsanitize=thread`; the vehicle is the T1
 differential driver, whose oracles are self-verifying:
@@ -175,6 +175,41 @@ Practical notes, each of which cost real time at least once:
 - The driver's `mersenne_twister_engine` frames are **not** a race: each worker
   thread owns its RNG. If you see that name, you are looking at mis-symbolization
   (previous bullet).
+
+---
+
+## 4b. UBSan and LeakSanitizer sweeps
+
+The same Makefile knob takes `SANITIZE=undefined` (no shadow memory, so a full
+21-backend sweep is a couple of minutes) and `SANITIZE=address`
+(AddressSanitizer+UBSan together). Both are gating in CI: `ubsan-gate` runs the
+driver over every backend, `sanitizer` runs `bank`/`test_tx`/`test_ds` over every
+backend.
+
+```sh
+UBSAN_OPTIONS="halt_on_error=1:print_stacktrace=0" \
+  make -B -C benchmarks/cpp bin/drv_diff_ops BACKEND=TINYSTM SANITIZE=undefined
+```
+
+- **`print_stacktrace=0` is not cosmetic.** UBSan forks `llvm-symbolizer` to render
+  a report; when that helper fails, the report is lost *and* the process dies of
+  SIGPIPE, so the exit status is 141 — which looks like a backend crash. Turn
+  symbolisation off and resolve the offsets yourself, as above.
+- **Distinguish the three UBSan shapes.** A *hook-table* mismatch ("call to
+  function `real_tm_read_i4(int*)` through pointer to incorrect function type")
+  means a backend's hook definition stopped matching `TMRealHooks`; the rule is
+  that a hook registration never casts ([CORRECTNESS_FIXES.md §33](CORRECTNESS_FIXES.md)).
+  Pointer-arithmetic findings ("applying non-zero offset … to null pointer")
+  usually mean a fast path computed a boundary before testing for an empty
+  per-thread structure.
+- **Leaks are attributed, never suppressed, except in two known places.**
+  `tests/concurrency/asan-suppressions-jvstm.txt` (JVSTM has no version
+  reclamation at all) and nothing else; a new leak belongs in
+  [TODO.md](../TODO.md) with its symbolised owner, and `ci.yml`'s `leak_check`
+  matrix entry flips on for a backend once its leaks are gone.
+
+---
+
 
 ---
 

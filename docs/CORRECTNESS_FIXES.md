@@ -1192,10 +1192,64 @@ driver thread). This is why `ci.yml`'s `tsan-gate` runs ACCELTL2 with
 `TM_ACCEL_DISABLE=1` and `nightly.yml`'s `accel-e2e` job covers the device path
 functionally instead.
 
+## 33. Two classes of undefined behaviour that only a sanitizer could see (2026-11-26) ✅
+
+Running `drv_diff_ops` under `-fsanitize=undefined` for every backend produced two
+findings that no functional test can express, both live in the tree for a long
+time. Commit `065cfac`.
+
+**a) Region allocator: pointer arithmetic on a null slab base.** A thread's slab
+is null until its first allocation, yet both bump-allocating paths computed the
+end of the next block *before* deciding whether the slab was usable
+(`tm_region_malloc`'s large path and `tm_region_chunk_alloc`), so every thread's
+first allocation evaluated `nullptr + 65536`. That happens to compare greater
+than a null `end`, so the correct branch was always taken and nothing ever went
+wrong — which is precisely why 120/120 and 207/207 never noticed, while
+UndefinedBehaviorSanitizer flagged it in TINYSTM, WBETL and WT on the first
+allocation of `main`. *Fix*: recognise the empty slab from the pointer itself and
+perform no arithmetic on it (`char *next = p ? p + size : nullptr;` with
+`if (!next || next > g_tl_slab.end)`), leaving the branch structure untouched.
+
+**b) Hook ABI: four backends registered mismatched function-pointer types.**
+`TMRealHooks` declares `uint32_t (*read_i4)(uint32_t *)` and
+`void (*write_i8)(uint64_t *, int64_t)`, but JVSTM, GACCO, CALVIN and GPUTX
+defined their hooks over the *signed* pointer types (`real_tm_read_i4(int32_t *)`,
+`real_tm_write_i8(int64_t *, uint64_t)`) and bridged the difference with an
+explicit cast at the registration site:
+
+```c
+.read_i4 = (uint32_t (*)(uint32_t *))real_tm_read_i4,
+```
+
+The cast silences the compiler, and calling through the mismatched type is
+undefined behaviour — UBSan said so at the call site: *"call to function
+real_tm_read_i4(int*) through pointer to incorrect function type
+`unsigned int (*)(unsigned int *)`"*. It is also exactly what
+`-fsanitize=cfi`/LTO devirtualisation rejects, so the pattern was a future
+miscompilation waiting to happen. *Fix*: the eight definitions in each of the four
+backends now match the table, and **all 32 registration casts are gone**, so the
+compiler verifies hook signatures from now on. The other 15 backends already
+registered without casts, which is why only these four were affected — casting is
+what made the difference, and it is why the rule going forward is that a hook
+registration never casts.
+
+**Verification.** `-fsanitize=undefined` driver runs (`-S 1..2 -T 8 -n 1500`) go
+from one runtime error to **0** for all 20 backends swept, with every oracle
+counter 0 and exit status 0; ACCELTL2 is clean in both device-off and
+device-forced (`TM_ACCEL_MIN=1`) modes. JVSTM, GACCO, CALVIN and GPUTX: `test_tx`
+120/120, `test_ds` 207/207, driver oracles all zero, with `nm -C` confirming each
+binary contained its intended backend. `make check-diff` passes for all 21
+backends. `.github/workflows/ci.yml` gained a blocking `ubsan-gate` job (21
+backends × the driver) so neither class can return silently, and its
+`UBSAN_OPTIONS=print_stacktrace=0` is deliberate: forking a broken
+`llvm-symbolizer` loses the report *and* turns the exit status into 141 (SIGPIPE),
+which is how this host's toolchain defect first masqueraded as backend failures.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |
 |-------|----------|-------|
+| Exit-time leaks (10 backends) and JVSTM's unbounded version history | Medium | All 21 backends are clean of AddressSanitizer *memory* errors on `bank`/`test_tx`/`test_ds`, but LeakSanitizer still fails `bank` on TINYSTM, WBETL, WT, SWISSTM, XTM, SPHT, LEFTRIGHT, ROMULUS and CALVIN and `test_tx` on JVSTM, so `ci.yml` gates leaks on the 11 backends measured clean and disables them elsewhere (per-backend `leak_check`, never globally). Three distinct owners, measured on `bank -t 4 -d 1000`: the benchmark's own executor/future objects (LEFTRIGHT 53.6 KB/1079, ROMULUS 71.4 KB/326, XTM 1.4 KB/12 — harness, not backend, but it also distorts memory measurements), backend metadata never released (SPHT 524 KB in 8 allocations of wait/epoch state, SWISSTM's ownership-record table, TINYSTM's `thread_local` deferred- and retired-free lists which a worker's exit simply drops — 130 KB/31), and version records that are never reclaimed (JVSTM: peak RSS rises **10.9x** when the transaction count rises 10x, 856 KB to 9.3 MB, while MVLOG/CSMV/SWISSTM stay flat because they trim). Fix designs in `TODO.md`. |
 | Per-backend ThreadSanitizer races (drained) | Low | Post-§30/§31 sweep of `drv_diff_ops -S 1 -T 4 -n 200`: **every** backend reports **0** warnings and **0** consistency violations, ACCELTL2 included. Its device path still prints 12 reports under ThreadSanitizer, but every one of them has its stack inside `libamdocl64.so`/`libhsa-runtime64.so.1` and none names one of our sources (§32); `tests/concurrency/tsan-suppressions-opencl.txt` documents them, `ci.yml`'s `tsan-gate` gates the CPU path, and `nightly.yml`'s `accel-e2e` covers the device path functionally. |
 | `tm_swap_runtime()` publication | Low | A phase switch writes all 23 dispatch pointers under `s_hook_mutex` while other threads read them locklessly, so a switch racing with live transactions could mix two backends' hooks. Its only caller (`tests/explicit-api/test_phase_switch.cpp`) is single-threaded, so this is latent rather than live, and no sanitizer case exercises it. Needs per-thread shadow tables or a quiescence epoch; see `TODO.md`. |
 | ARM TME simulation: built but never run | Medium | gem5 v25.1.0.1 implements TME, and the path is now complete on the input side: `configs/arm-tme-kvm.py` adds the `TME` release extension, `workloads/tme/Makefile` builds with `-march=armv8.1-a+tme` (needs `gcc-aarch64-linux-gnu`; clang has no Arm TME support through LLVM 22), and `nightly.yml` compiles both the RTM and TME workloads. Still missing: an ARM/ALL gem5 build (`setup.sh` only produces `build/X86_TSX`) and therefore an end-to-end `scripts/run-arm-tme.sh` run. x86 TSX is the reference path that works. |

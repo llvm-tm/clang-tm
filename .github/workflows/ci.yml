@@ -276,11 +276,67 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        backend: [NOREC, TL2]
+        # AddressSanitizer's memory-error checks run for every backend: none of
+        # them reports one on bank/test_tx/test_ds (verified locally, 2026-11-26).
+        # LeakSanitizer is per-backend, because several backends hold allocations
+        # that are only ever reclaimed by the OS at process exit; those are listed
+        # in TODO.md with a fix design, and flip into leak_check: true as each is
+        # fixed. Do not disable leaks globally again - that hid a real one.
+        backend:
+          - TINYSTM
+          - WBETL
+          - WT
+          - NOREC
+          - NORECBF
+          - SWISSTM
+          - TL2
+          - TSC_TM
+          - MVLOG
+          - SGL
+          - LEFTRIGHT
+          - ROMULUS
+          - XTM
+          - SPHT
+          - TSXSGL
+          - GPU_STM_CPU
+          - CSMV
+          - JVSTM
+          - GACCO
+          - CALVIN
+          - GPUTX
+        leak_check: [false]
+        include:
+          # Leak-clean on bank + test_tx + test_ds under detect_leaks=1, measured
+          # per backend. Everything else leaks at exit and is listed in TODO.md
+          # under the three known sources (the bank harness's own executor/future
+          # objects, backend metadata never released, and JVSTM's absence of
+          # version reclamation) - fix the owner, then add it here.
+          - backend: NOREC
+            leak_check: true
+          - backend: NORECBF
+            leak_check: true
+          - backend: TL2
+            leak_check: true
+          - backend: MVLOG
+            leak_check: true
+          - backend: CSMV
+            leak_check: true
+          - backend: SGL
+            leak_check: true
+          - backend: GACCO
+            leak_check: true
+          - backend: GPUTX
+            leak_check: true
+          - backend: TSC_TM
+            leak_check: true
+          - backend: TSXSGL
+            leak_check: true
+          - backend: GPU_STM_CPU
+            leak_check: true
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
-      ASAN_OPTIONS: detect_leaks=0
+      ASAN_OPTIONS: detect_leaks=${{ matrix.leak_check && 1 || 0 }}
       UBSAN_OPTIONS: print_stacktrace=1
     steps:
       - uses: actions/checkout@v5
@@ -389,6 +445,77 @@ jobs:
               addr2line -f -C -e "$BIN" "0x$off" | head -2 | tr '\n' ' '
               echo
             done
+
+  # ── Job 11: UBSan gate (every backend) ──────────────────────
+  # UndefinedBehaviorSanitizer over the T1 differential driver, per backend. Cheap
+  # (no shadow memory) and it catches what the race gate cannot: hooks registered
+  # through a mismatched function-pointer type - invisible to the compiler behind
+  # the explicit cast used at the registration site - and pointer arithmetic on a
+  # null slab base. Both were live in this tree until 2026-11-26; see
+  # docs/CORRECTNESS_FIXES.md §33.
+  ubsan-gate:
+    if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - TINYSTM
+          - WBETL
+          - WT
+          - NOREC
+          - NORECBF
+          - SWISSTM
+          - TL2
+          - TSC_TM
+          - MVLOG
+          - SGL
+          - LEFTRIGHT
+          - ROMULUS
+          - XTM
+          - SPHT
+          - TSXSGL
+          - GPU_STM_CPU
+          - CSMV
+          - JVSTM
+          - GACCO
+          - CALVIN
+          - ACCELTL2
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    env:
+      # print_stacktrace=0 because UBSan forks llvm-symbolizer, and on images
+      # where that binary fails the report is lost and the exit status becomes
+      # 141 (SIGPIPE), which reads as an unexplained failure. Resolve offsets
+      # offline with addr2line instead (docs/DEBUGGING_BACKENDS.md §4).
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=0
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install LLVM 22
+        run: |
+          sudo wget -q -O /etc/apt/trusted.gpg.d/llvm-snapshot.asc \
+            https://apt.llvm.org/llvm-snapshot.gpg.key
+          sudo add-apt-repository "deb https://apt.llvm.org/jammy/ \
+            llvm-toolchain-jammy-22 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-22-dev clang-22 lld make
+
+      - name: Build UBSan differential driver (${{ matrix.backend }})
+        run: make -C benchmarks/cpp bin/drv_diff_ops BACKEND=${{ matrix.backend }} SANITIZE=undefined
+
+      - name: Run UBSan differential driver (${{ matrix.backend }})
+        run: |
+          set -o pipefail
+          ./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 8 -n 1000 2>&1 | tee /tmp/ubsan-run.log
+
+      - name: Fail on any undefined behaviour
+        run: |
+          n=$(grep -c 'runtime error:' /tmp/ubsan-run.log || true)
+          echo "UBSan runtime errors: $n"
+          if [ "$n" -ne 0 ]; then
+            grep 'runtime error:' /tmp/ubsan-run.log | head -20
+            exit 1
+          fi
 
   # ── Job 12: Markdown link integrity (relative links only) ─
   md-links:

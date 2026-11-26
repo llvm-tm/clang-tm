@@ -3520,3 +3520,47 @@ that a `mersenne_twister_engine` "race" means mis-symbolization);
 reconciled, plus the new nightly rows; `backends/tm_impl/accel_tl2/STATUS.md`
 records the end-to-end device validation and the measured ~39× cost of forcing
 prevalidation on every commit (why the default threshold is 4096 entries).
+
+## Session 2026-11-26 (small hours) — two classes of UB removed; sanitizer matrices widened to all backends
+
+**Undefined behaviour, found by running the T1 driver under
+`-fsanitize=undefined` for every backend** (commit `065cfac`,
+CORRECTNESS_FIXES.md §33):
+
+- *Region allocator*: both bump-allocating paths computed
+  `g_tl_slab.bump + size` before testing whether the thread had a slab, so every
+  thread's first allocation performed `nullptr + 65536`. The comparison happened
+  to reach the right branch, which is why 120/120 and 207/207 never saw it.
+- *Hook ABI*: JVSTM, GACCO, CALVIN and GPUTX defined their read/write hooks over
+  signed pointer types and bridged to `TMRealHooks`' unsigned types with an
+  explicit cast at the registration site — calling through the mismatched type is
+  UB and is what `-fsanitize=cfi` rejects. The 32 casts are gone, so the compiler
+  now checks hook signatures; the 15 backends that registered without casts were
+  never affected, which is the real lesson.
+
+UBSan driver runs go from 1 runtime error to 0 on all 20 backends swept (plus
+ACCELTL2 in both device modes); `nm -C` confirmed binary identity per backend;
+`make check-diff` green for 21 backends. Also fixed the CSMV line `make
+fmt-check` had been rejecting on main since `cf7ff56`.
+
+**CI (option b, previously T3/T4).** New blocking `ubsan-gate` job over all 21
+backends. The `sanitizer` job went from NOREC/TL2 to all 21 backends — none has an
+AddressSanitizer memory error — and, because it had been running with
+`detect_leaks=0` globally, leak checking is now enabled **per backend** via a
+`leak_check` matrix entry for the 11 measured clean. `UBSAN_OPTIONS` in CI sets
+`print_stacktrace=0`: forking a broken `llvm-symbolizer` loses the report and
+kills the process with SIGPIPE, and the resulting exit 141 had been masquerading
+as backend failures on this host all night.
+
+**Newly measured, not yet fixed (TODO.md).** JVSTM performs no version
+reclamation at all — peak RSS rises 10.9× for a 10× workload (856 KB → 9.3 MB)
+where MVLOG/CSMV/SWISSTM stay flat — with a fix design that reuses the CSMV
+§27–§28 registry low-water-mark pattern. Ten backends still leak at exit across
+three distinct owners: `bank`'s own executor/future objects, backend metadata
+never released (SPHT 524 KB, SWISSTM's ownership table), and TinySTM's
+`thread_local` deferred/retired free lists that a worker's exit drops (with the
+note that freeing them at thread exit would be unsafe, and what to do instead).
+`tests/concurrency/asan-suppressions-jvstm.txt` lets developers run ASan on JVSTM
+meanwhile. Docs: `docs/DEBUGGING_BACKENDS.md` §4b (UBSan/LSan recipe, including
+the symbolizer pitfall and how to tell the three UBSan shapes apart),
+`docs/DEVELOPER_GUIDE.md` CI tables.

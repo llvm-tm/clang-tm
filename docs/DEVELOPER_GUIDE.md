@@ -217,7 +217,7 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 
 ## CI Pipeline
 
-### `.github/workflows/ci.yml` (17 jobs, on `push` to main/master + `pull_request`)
+### `.github/workflows/ci.yml` (18 jobs, on `push` to main/master + `pull_request`)
 
 | Job | Blocking? | What it does |
 |-----|-----------|-------------|
@@ -231,7 +231,8 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 | stale-check | yes | Assert legacy directories (`llvm_tm_plugin`, `expli-benchmarks`, `plugin-benchmarks`, `rust_tm_api`) are gone |
 | tla-smoke | yes | Blocking 3-model smoke (`SGL`, `NOrec-smoke`, `TinySTM_WBCTL`), 60 s/model budget |
 | lint | yes | `clang-format-22`, `cargo fmt --check`, `clippy -D warnings` |
-| sanitizer | yes | ASan build + run of `bank`, `test_tx`, `test_ds` over NOREC/TL2 |
+| sanitizer | yes | ASan+UBSan build + run of `bank`, `test_tx`, `test_ds` over all 21 C++ backends (no memory errors anywhere); LeakSanitizer is on per-backend (`leak_check: true`) for the 11 measured clean and off for the 10 that still leak at exit, so a new leak fails without having to disable leak checking globally |
+| ubsan-gate | yes | `-fsanitize=undefined` build + `drv_diff_ops` over all 21 backends; catches hook-table function-pointer type mismatches and pointer-arithmetic UB that the race gate cannot |
 | tsan-gate | yes | `-fsanitize=thread` build + `drv_diff_ops` over all 19 C++ backends, each of which is race-clean (CSMV also in `CSMV_SERVER_COMMIT=1` mode; ACCELTL2 with `TM_ACCEL_DISABLE=1`, since its device path's only reports come from the OpenCL driver); a new race or consistency violation fails the PR |
 | md-links | yes | Relative Markdown link integrity |
 | plugin-benchmarks-build | yes | Build the plugin-instrumented benchmark binaries |

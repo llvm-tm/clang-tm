@@ -335,6 +335,67 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   `x86-tsx-validation.md` are tick-capped partial samples — see
   `gem5_sim/docs/x86-tsx-real-validation.md` §2.
 
+### Exit-time leaks: 11 of 21 backends are leak-clean and gated; 10 are not (opened 2026-11-26)
+
+`ci.yml`'s `sanitizer` job now runs AddressSanitizer over `bank`/`test_tx`/`test_ds`
+for **all 21** backends (none has a memory error) with LeakSanitizer enabled
+per-backend only where it is clean (`leak_check: true`: NOREC, NORECBF, TL2, MVLOG,
+CSMV, SGL, GACCO, GPUTX, TSC_TM, TSXSGL, GPU_STM_CPU). It was previously
+`detect_leaks=0` globally, which is why none of this was visible. Three owners,
+measured on `bank -t 4 -d 1000` with `detect_leaks=1`:
+
+| backend | leaked | owner (symbolised from the report) |
+|---|---|---|
+| LEFTRIGHT | 53.6 KB / 1079 | the harness: `expli::QueueExecutor` futures/`std::function` deques |
+| ROMULUS | 71.4 KB / 326 | the harness, same pattern |
+| XTM | 1.4 KB / 12 | the harness, `execute_async` state |
+| SPHT | 524 KB / 8 | backend wait/epoch state (vector of `condition_variable`, strings) |
+| SWISSTM | 456 B / 9 | the `OwnershipRecord*` hash table |
+| TINYSTM / WBETL / WT | 130 KB / 31 | `thread_local` deferred- + retired-free lists dropped when a worker exits |
+| CALVIN | (bank only) | per-thread `CalvinState` |
+| JVSTM | 10.8 KB in `test_tx` | every committed `VBoxBody`, forever — see the next entry |
+
+Two of these are worth real fixes rather than suppression:
+
+- **TinySTM's free-deferral lists are `thread_local` and are dropped at thread
+  exit** (`g_deferred_frees`, `g_retired_frees`, `g_deferred_frees_set` in
+  `backends/tm_impl/tiny_stm/TinySTM_runtime.cpp`). A worker that queues frees and
+  then exits without another commit loses them. Freeing them *at thread exit* is
+  **wrong** — the deferral exists precisely because other transactions may still
+  read the buffer. The safe shape: hand the departing thread's lists to a
+  mutex-guarded global orphan list (its pointers are already in
+  `g_retired_global_set`, so the "free exactly once" property holds), let
+  `tm_flush_retired_frees()` retire entries from it as usual, and drain whatever
+  is left in `tm_exit()`, where the contract guarantees no transaction is live.
+  Same argument applies to CALVIN's `__thread CalvinState`.
+- **`bank`'s own executor objects leak**, which also makes its memory numbers
+  wrong; fixing the harness is a prerequisite for gating LEFTRIGHT/ROMULUS/XTM.
+
+`tests/concurrency/asan-suppressions-jvstm.txt` exists for JVSTM (verified: 12 → 0
+reports, `test_tx` 120/120) so a developer can run ASan on it meanwhile; do not add
+entries to it for anything else.
+
+### JVSTM has no version reclamation at all (P1, opened 2026-11-26)
+
+`backends/tm_impl/jvstm/jvstm_runtime.cpp` allocates a `VBox` per tracked address
+and prepends a fresh immutable `VBoxBody` on **every committed write**, with no GC
+pass anywhere in the file (the only `free`-ish code is `real_tm_free` for TM
+blocks). Measured on `bank -t 4`: peak RSS 856 KB at 20k transactions and 9.3 MB at
+200k — i.e. ~48 bytes and a factor of **10.9x per 10x workload**, unbounded, while
+MVLOG (44.5→44.8 MB), CSMV (57.4→57.9 MB) and SWISSTM (262.2→262.9 MB) stay flat
+because they trim. `test_tx` under LeakSanitizer reports 10 808 bytes in 579
+allocations, all from `get_or_create_vbox`.
+
+This is the paper's reclamation pass being unimplemented, not a slip, so the fix is
+a feature: reuse the pattern already proven for CSMV in §27–§28 — publish a lower
+bound taken from an active-transaction registry *before* reading the clock, then
+let a commit trim bodies older than that low-water mark (keeping the newest body at
+or below it). JVSTM's bodies are already chained newest-first from
+`box->head.load(acquire)`, and `find_body()` walks that chain, so trimming is
+"snap the chain"; the hard part, as in CSMV, is that the low-water mark must come
+from the registry and not from a clock read. Until then, JVSTM is not suitable for
+long-running processes and stays out of the leak-gated list.
+
 ### gem5 POWER8 HTM implementation (8-patch plan, in progress)
 - **Plan**: `gem5_sim/docs/power8-htm-patches.md`
 - **Status** (as of 2026-09-01, commit `7c6b927501`):
