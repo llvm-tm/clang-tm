@@ -4035,9 +4035,12 @@ closed, new item opened), `docs/DEVELOPER_GUIDE.md` (`backend-unit` row names th
 Closed the item the previous block had just opened. `tm_hooks.cpp`'s oracle wrapper printed
 `TM-INVARIANT: FAIL (… after tx %llu …)` from `t_current_tx_id`, which is incremented only in
 `trace_begin()` under `TM_TRACE_PATH` — so with an oracle registered and tracing off, the
-normal case, every single report said `after tx 0` (the previous block's own captured output
-shows exactly that, twice, for two different commits). The line's entire purpose is to point
-at a transaction.
+normal case, every single report said `after tx 0`. The evidence is 84 capture files that
+block left behind, one line each, every one of them `after tx 0` — and each of those *was* the
+21st commit on its thread, since the test's violation is fixed at commit #21. (Correction to
+this entry as first written, which said "two failures on two different commits": they were two
+runs of the same 21st-commit violation, one line per run. Same conclusion, weaker sentence
+than the artifact supports.) The line's entire purpose is to point at a transaction.
 
 Fix is the narrow, honest one: the wrapper counts the commits it runs the oracle over, per
 thread, and prints `after commit #N`. It cannot be wrong about the thing the line claims,
