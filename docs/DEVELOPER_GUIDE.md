@@ -217,7 +217,7 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 
 ## CI Pipeline
 
-### `.github/workflows/ci.yml` (10 jobs, on `push` to main/master + `pull_request`)
+### `.github/workflows/ci.yml` (17 jobs, on `push` to main/master + `pull_request`)
 
 | Job | Blocking? | What it does |
 |-----|-----------|-------------|
@@ -226,13 +226,21 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 | rust-build | yes | Build Rust workspace + benchmarks + run workspace tests |
 | race-checker | yes | Run `tm-race-checker` pass over every `.bc` produced by `make plugin` |
 | cross-backend | yes (gated by event) | Build + test C++ backends (TINYSTM/NOREC/TL2 on PRs, 13 on push to main) |
+| diff-concurrency | yes | `tools/diff_backends.sh`: the T1 differential driver over every backend, plus the width-clobber / bucket-alias repros |
+| backend-unit | yes | `tests/backends/tm_impl` per-backend unit suite (matrix) |
 | stale-check | yes | Assert legacy directories (`llvm_tm_plugin`, `expli-benchmarks`, `plugin-benchmarks`, `rust_tm_api`) are gone |
-| tla-plus-check | no | Run `tlc2.TLC` over every `docs/proofs/*.tla` (with `|| true`) |
 | tla-smoke | yes | Blocking 3-model smoke (`SGL`, `NOrec-smoke`, `TinySTM_WBCTL`), 60 s/model budget |
 | lint | yes | `clang-format-22`, `cargo fmt --check`, `clippy -D warnings` |
 | sanitizer | yes | ASan build + run of `bank`, `test_tx`, `test_ds` over NOREC/TL2 |
+| tsan-gate | yes | `-fsanitize=thread` build + `drv_diff_ops` over the 18 backends that are race-clean (CSMV also in `CSMV_SERVER_COMMIT=1` mode); a new race or consistency violation fails the PR |
+| md-links | yes | Relative Markdown link integrity |
+| plugin-benchmarks-build | yes | Build the plugin-instrumented benchmark binaries |
+| header-compiles | yes | Compile every public header standalone (catches include-order breakage) |
+| macos-portability | yes | Build/run the C++ side on macOS |
+| fuzz-smoke | yes | Short fuzz-target smoke run |
 
-### `.github/workflows/nightly.yml` (7 jobs, cron)
+
+### `.github/workflows/nightly.yml` (9 jobs, cron)
 
 | Job | Cadence | What it does |
 |-----|---------|-------------|
@@ -240,6 +248,8 @@ debug patches + Rust `tm-sim` trace replay, with a worked `bank_tl2` example).
 | cross-backend-full | daily | 15-backend CSV matrix (non-blocking) |
 | post-merge-check | weekly (Sun) | `make post-merge-check` (full plugin + C++ + Rust + sim + integrity matrix) |
 | audit | weekly | `cargo audit` on `simulator/` |
-| tsan | weekly | ThreadSanitizer build + run of `bank`/`test_tx`/`test_ds` over NOREC/TL2 |
+| tsan | weekly | Non-blocking ThreadSanitizer sweep (`bank` + `drv_diff_ops`) over the backends that still carry known races; the race-clean ones are gated in `ci.yml`'s `tsan-gate` instead |
 | coverage | weekly | `cargo llvm-cov` on the Rust workspace + simulator |
 | gpu-compile-check | weekly | Compile GPU benchmarks on self-hosted runner; skips when no `nvcc`/`hipcc` |
+| htm-workloads-compile | weekly | Build `gem5_sim/workloads/rtm` (host `-mrtm`) and `gem5_sim/workloads/tme` (`-march=armv8.1-a+tme` via `gcc-aarch64-linux-gnu`) — the only check those bare-metal HTM programs get |
+| cpp-coverage | weekly | `llvm-cov` line report for the region allocator, common runtime and a representative backend (non-blocking) |

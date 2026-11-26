@@ -127,6 +127,57 @@ memory-ordering / fences.
 
 ---
 
+## 4. ThreadSanitizer sweeps (`SANITIZE=thread`)
+
+Every backend builds and runs under `-fsanitize=thread`; the vehicle is the T1
+differential driver, whose oracles are self-verifying:
+
+```sh
+make -C benchmarks/cpp bin/drv_diff_ops BACKEND=TL2 SANITIZE=thread
+TSAN_OPTIONS="halt_on_error=0:external_symbolizer_path=" \
+  ./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 4 -n 200
+```
+
+Practical notes, each of which cost real time at least once:
+
+- **`external_symbolizer_path=` is required here.** TSan forks a symbolizer, and
+  the one that pairs with LLVM 22 dies inside `llvm-symbolizer` ("CachedFileStream
+  was not committed" / `Can't read from symbolizer at fd 3`), which silently
+  turns a useful report into an unsymbolized one. Run it with no external
+  symbolizer and resolve the offsets yourself, below.
+- **Resolve frames against the exact binary that produced the report**, using the
+  module-relative offset TSan prints:
+
+  ```sh
+  addr2line -i -C -f -e benchmarks/cpp/bin/drv_diff_ops 0xf4769
+  ```
+
+  `-i` matters: the interesting frame is usually inlined into `commit()` or a
+  `read_word()`.
+- **Data addresses need the load base.** For the *accessed object* TSan prints an
+  absolute runtime address. Subtract the PIE load base (first mapping of the
+  binary in `/proc/<pid>/maps`, easy to catch by running the binary with a large
+  `-n` and sampling it), then look the resulting link-time address up in
+  `nm -S --defined-only` — that is how `tm_rtm::available()::cached` was
+  identified in §31 of [CORRECTNESS_FIXES.md](CORRECTNESS_FIXES.md).
+- **Copy the binary per backend when sweeping.** `make … BACKEND=X` overwrites
+  `benchmarks/cpp/bin/drv_diff_ops`, so symbolizing afterwards resolves every
+  backend's offsets against the *last* one built and yields confident, completely
+  wrong function names. Snapshot as you go (`cp bin/drv_diff_ops /tmp/bin-X`).
+- **Exit codes are the gate.** `drv_diff_ops` exits 2 on any consistency
+  violation, 0 otherwise, so `ci.yml`'s `tsan-gate` job can fail on the process
+  status and count warnings from the log.
+- A race between `commit`'s write-back and a lockless speculative read is the
+  *intended* protocol in the single-version backends; it is expressed with
+  relaxed loads and release stores since
+  [CORRECTNESS_FIXES.md §30](CORRECTNESS_FIXES.md). A fresh report of that shape
+  means plain accesses crept back in.
+- The driver's `mersenne_twister_engine` frames are **not** a race: each worker
+  thread owns its RNG. If you see that name, you are looking at mis-symbolization
+  (previous bullet).
+
+---
+
 ## Worked example — B-21: bank `tl2` money not conserved
 
 Symptom: `bank_tl2 -t 4 -d 600 -r 0 --test` (100% transfers) drifted by ~-400

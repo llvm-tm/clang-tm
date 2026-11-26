@@ -284,6 +284,17 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
   thread reuses that slot. Bounded (4096 slots) and conservative, but unbounded
   version growth if it happens early. Consider a heartbeat/epoch or a
   per-slot thread-id + liveness check.
+- **`tm_swap_runtime()` still writes the dispatch table while threads may be
+  running** (`backends/tm_impl/common/tm_hooks.cpp`): unlike the §29 publication
+  path, a phase switch *intends* to change the table, so it writes all 23
+  pointers under `s_hook_mutex` while other threads dispatch through them
+  locklessly — a torn swap could mix two backends' hooks in one call sequence.
+  Today the only caller is `tests/explicit-api/test_phase_switch.cpp`, which is
+  single-threaded, so it is latent. A correct multi-threaded phase switch needs
+  either per-thread shadow tables (each thread picks its table at
+  `tm_init_thread`, and a switch waits for a quiescence epoch) or a real RCU
+  hand-off. Add a TSan CI case for it at the same time — nothing in the current
+  matrices touches `tm_swap_runtime`.
 - **ACCELTL2 OpenCL/SVM path: 2 races + 1 thread leak**
   (`backends/tm_impl/acceltl2/`): the shared `any_type_mapping` atomics took
   ACCELTL2 from 16 TSan warnings to 3, and what remains is accelerator plumbing
