@@ -284,8 +284,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # AddressSanitizer's memory-error checks run for every backend: none of
-        # them reports one on bank/test_tx/test_ds (verified locally, 2026-11-26).
+        # AddressSanitizer's memory-error checks run for all 22 C++ backends: none
+        # of them reports one on bank/test_tx/test_ds (verified locally, 2026-11-26,
+        # ACCELTL2 included - it is the TL2 runtime behind -DTM_ACCEL_GPU, and its
+        # accel:: paths are in the binary whether or not a device is present).
         # LeakSanitizer is per-backend, because several backends hold allocations
         # that are only ever reclaimed by the OS at process exit; those are listed
         # in TODO.md with a fix design, and flip into leak_check: true as each is
@@ -312,6 +314,7 @@ jobs:
           - GACCO
           - CALVIN
           - GPUTX
+          - ACCELTL2
         leak_check: [false]
         include:
           # Leak-clean on bank + test_tx + test_ds under detect_leaks=1, measured
@@ -341,11 +344,26 @@ jobs:
             leak_check: true
           - backend: GPU_STM_CPU
             leak_check: true
+          # ACCELTL2 measured leak-clean on bank + test_tx + test_ds with
+          # detect_leaks=1 (0 reports, 120/207, money conserved), so it is gated
+          # like the rest. Honest caveat: that was with TM_ACCEL_DISABLE=1 and on a
+          # host with no AMD IGP, i.e. its CPU path. The device-backed SVM path
+          # allocates through the runtime's own buffers and has never been measured
+          # for leaks; if a GPU runner ever disagrees, the fix is to measure the
+          # device path, not to drop this entry silently.
+          - backend: ACCELTL2
+            leak_check: true
     runs-on: ubuntu-22.04
     timeout-minutes: 30
     env:
       ASAN_OPTIONS: detect_leaks=${{ matrix.leak_check && 1 || 0 }}
       UBSAN_OPTIONS: print_stacktrace=1
+      # Same reason tsan-gate sets it: the OpenCL ICD the accelerator probe dlopens
+      # spawns its own worker threads and allocates through them, which is not ours
+      # to account for. Neither this job's runners nor the measurement host has an
+      # AMD IGP, so ACCELTL2's device-backed SVM path is not exercised either way;
+      # it stays under nightly.yml's accel-e2e. Measured with the probe disabled.
+      TM_ACCEL_DISABLE: ${{ matrix.backend == 'ACCELTL2' && '1' || '0' }}
     steps:
       - uses: actions/checkout@v5
       - name: Install LLVM 22
@@ -369,14 +387,23 @@ jobs:
 
 
   # ── Job 10b: TSan race gate (race-clean backends) ─────────
-  # Every C++ backend in the tree is gated: all of them report zero
-  # ThreadSanitizer warnings on the T1 differential driver, and the driver exits
-  # non-zero on any consistency violation, so a race or anomaly introduced into
-  # any backend now fails the PR. ACCELTL2 is gated on its CPU path (see the
-  # TM_ACCEL_DISABLE comment below); its device-backed SVM path needs a machine
-  # with a real IGP and stays in the non-blocking nightly sweep. When a backend
-  # regresses, docs/CORRECTNESS_FIXES.md's known-issues table and the triage
-  # table in TODO.md say where the pattern usually is.
+  # 21 of the tree's 22 C++ backends are gated: each reports zero ThreadSanitizer
+  # warnings on the T1 differential driver, and the driver exits non-zero on any
+  # consistency violation, so a race or anomaly introduced into a gated backend
+  # fails the PR. Two things this deliberately does NOT claim:
+  #   * ACCELTL2 is gated on its CPU path only (see the TM_ACCEL_DISABLE comment
+  #     below); its device-backed SVM path needs a machine with a real IGP and
+  #     stays in the non-blocking nightly sweep.
+  #   * GPUTX is not gated here at all. Its reads are plain accesses of memory
+  #     that committing threads write back, so it reports 12 races at -T 4 -n 200
+  #     and 15 at -T 8 -n 1000, every one of them do_read()'s load against
+  #     real_tm_end()'s write-back (docs/CORRECTNESS_FIXES.md §35). It is gated
+  #     under ASan, UBSan and the differential driver; the per-slot version stamps
+  #     that would make it race-clean, and the acceptance test for adding it, are
+  #     in TODO.md. GACCO and CALVIN were measured on 12 seeds each at both shapes
+  #     with 0 warnings before being added.
+  # When a gated backend regresses, docs/CORRECTNESS_FIXES.md's known-issues table
+  # and the triage table in TODO.md say where the pattern usually is.
   tsan-gate:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
@@ -401,6 +428,8 @@ jobs:
           - TSXSGL
           - SPHT
           - GPU_STM_CPU
+          - GACCO
+          - CALVIN
           - ACCELTL2
     runs-on: ubuntu-22.04
     timeout-minutes: 25
@@ -461,6 +490,10 @@ jobs:
   # the explicit cast used at the registration site - and pointer arithmetic on a
   # null slab base. Both were live in this tree until 2026-11-26; see
   # docs/CORRECTNESS_FIXES.md §33.
+  # All 22 C++ backends are in the matrix. GPUTX joined on 2026-11-26, measured on
+  # this job's own command (-S 1 -T 8 -n 1000) plus four seeds at -T 32 -n 5000
+  # with 0 "runtime error:" lines; unlike the race gate, UBSan has no objection to
+  # its unsynchronised reads (docs/CORRECTNESS_FIXES.md §35).
   ubsan-gate:
     if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     strategy:
@@ -487,6 +520,7 @@ jobs:
           - JVSTM
           - GACCO
           - CALVIN
+          - GPUTX
           - ACCELTL2
     runs-on: ubuntu-22.04
     timeout-minutes: 20

@@ -3710,3 +3710,39 @@ review-05 G-20/G-21 as allowlisted expected-fails, but both allowlists in
 (`run-swisstm` passes, `test_tx` 120/120 on GPUTX and GACCO). `docs/IMPLEMENTATIONS.md`
 §19 and `backends/tm_impl/gputx/STATUS.md` describe the commit lock and the two
 open limits.
+
+## Session 2026-11-26 (morning, first block) — sanitizer/TSan gate coverage reconciled with the tree
+
+The GPUTX work surfaced a claim that had quietly stopped being true: `ci.yml`'s
+`tsan-gate` header says *"Every C++ backend in the tree is gated: all of them report
+zero ThreadSanitizer warnings"*, but its matrix listed 19 of what are actually 22
+C++ backends, and `docs/DEVELOPER_GUIDE.md` plus the `CORRECTNESS_FIXES.md`
+known-issues row repeated the same "every backend" wording — so GACCO, CALVIN and
+GPUTX had no race gate and nothing recorded why. Measured with the job's own options
+on the driver at `-T 4 -n 200` and `-T 8 -n 1000`, on forced rebuilds identified by
+their hooks table (`g_gacco_hooks`, `g_calvin_hooks`, `g_gputx_hooks`) rather than
+by a name substring: GACCO and CALVIN are clean — 12 seeds at each shape, 0
+ThreadSanitizer warnings, 0 non-zero exits — so both are in the matrix now, which
+makes the count 21 and the claim true for everything except one backend. GPUTX
+reports 12 and 15 races on those shapes, every one of them `do_read()`'s plain load
+against `real_tm_end()`'s write-back, so it stays out on purpose and the job comment
+now says so with the numbers and the pointer to §35 and `TODO.md`, instead of the
+matrix silently disagreeing with the comment.
+
+The same audit over the other two sanitizer jobs found `ubsan-gate` missing GPUTX
+and the ASan `sanitizer` job missing ACCELTL2 — the latter had never been measured
+for memory errors or leaks at all. Both are in: GPUTX is UBSan-clean under the job's
+exact options (`halt_on_error=1:print_stacktrace=0`) on its own shape plus five seeds
+at `-T 16 -n 5000` (0 `runtime error:` lines), and ACCELTL2 is clean on
+`bank`/`test_tx`/`test_ds` **with `detect_leaks=1`** (0 reports, 120/207, money
+conserved), so it joins the leak-gated list too — 12 of 22 backends now fail CI on a
+new leak. ACCELTL2 runs under ASan with `TM_ACCEL_DISABLE=1` exactly as `tsan-gate`
+does, and the comment is explicit that this measures the CPU path (this host, like
+the runners, has no AMD IGP) and that if a GPU runner ever disagrees the answer is to
+measure the device path, not to drop the entry. Its identity needed a different check
+than the others: ACCELTL2 *is* the TL2 runtime behind `-DTM_ACCEL_GPU`, so the marker
+is 46 `tl2::` symbols plus 12 `accel::` ones, not an `acceltl2` hooks table.
+
+All three jobs' YAML re-parsed programmatically afterwards (22/22 in `sanitizer` and
+`ubsan-gate`, 21/22 in `tsan-gate` with the one exception named in the comment, and
+12 `leak_check: true` entries), and `make fmt-check` and `make check-fast` are clean.

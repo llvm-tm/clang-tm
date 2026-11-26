@@ -436,13 +436,21 @@ claim **more slots than the backend's reclamation threshold** or it never
 executes a reclamation. MVLog's is 16 384 slots; `tools/diff_backends.sh`'s
 `-T 8 -n 2000` legs are sized for that and say so.
 
-### Exit-time leaks: 11 of 21 backends are leak-clean and gated; 10 are not (opened 2026-11-26)
+### Exit-time leaks: 12 of 22 backends are leak-clean and gated; 10 are not (opened 2026-11-26, ACCELTL2 measured 2026-11-26)
 
 `ci.yml`'s `sanitizer` job now runs AddressSanitizer over `bank`/`test_tx`/`test_ds`
-for **all 21** backends (none has a memory error) with LeakSanitizer enabled
+for **all 22** backends (none has a memory error) with LeakSanitizer enabled
 per-backend only where it is clean (`leak_check: true`: NOREC, NORECBF, TL2, MVLOG,
-CSMV, SGL, GACCO, GPUTX, TSC_TM, TSXSGL, GPU_STM_CPU). It was previously
-`detect_leaks=0` globally, which is why none of this was visible. Three owners,
+CSMV, SGL, GACCO, GPUTX, TSC_TM, TSXSGL, GPU_STM_CPU, ACCELTL2). It was previously
+`detect_leaks=0` globally, which is why none of this was visible.
+
+ACCELTL2 was the last backend added to the ASan matrix (it had never been measured
+at all) and it went straight to leak-clean: 0 reports and 120/207 plus
+"PASS: Money conserved" on `bank`/`test_tx`/`test_ds` under `detect_leaks=1`, with
+`TM_ACCEL_DISABLE=1` — the same setting `tsan-gate` uses, and the same caveat: this
+host has no AMD IGP, so that measures the CPU path, and the device-backed SVM path's
+allocations have never been leak-measured. If a GPU runner ever reports it leaking,
+measure the device path rather than deleting the entry. Three owners,
 measured on `bank -t 4 -d 1000` with `detect_leaks=1`:
 
 | backend | leaked | owner (symbolised from the report) |
