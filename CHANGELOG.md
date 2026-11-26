@@ -3994,3 +3994,38 @@ in this repo will ever produce.
 
 Gates: `make check-pytools` (14 fixtures + 5 exit-code cases, ALL PASSED),
 `python3 -m compileall -q tools`, `make fmt-check`, `make check-fast`.
+
+## Session 2026-11-26 (morning, eighth block) — the user-oracle hook finally has a test, on all 12 backends
+
+Closed the gap the last block had just opened: `tm_register_invariant_callback()` is a public
+API that **rewrites the `tm_end` function pointer**, nothing in the tree had ever called it,
+and `invariant_checker.py`'s `user_oracle` invariant parsed a line no test produced.
+
+New `tests/backends/tm_impl/test_invariant_callback.cpp`, added to `TESTS` so CI's
+`backend-unit` job builds and runs it per backend. A two-account money-conservation oracle,
+registered after `tm_init()`, then: the public hook must actually be replaced; 20 clean
+transfers must produce exactly 20 oracle calls (so the wrapper fires once per commit); a clean
+run must print no FAIL line; one transaction that creates money must fire the oracle once and
+print exactly one `TM-INVARIANT: FAIL` on stderr — captured by `dup`/`freopen` inside the
+test and searched for the same substring `check_user_oracle` matches. Single-threaded by
+design: the property is the wrapper's, not scheduling's, and every backend has to agree.
+
+**All 12 backends pass 7/7** (tl2 tinystm wt wbetl norec swisstm xtm gpu_stm_cpu gputx gacco
+csmv mvlog), so the wrapper behaves identically across the tree — and the end ties: feeding
+the test's captured stderr to `invariant_checker.py` reports `1 critical` with exit 1, the
+first time a program's own verdict in this repo reaches the tool's verdict through a gate.
+The whole `make -C tests/backends/tm_impl run` (all 12 backends, every test, `mvlog`'s
+`gc_reader` SKIP intact) passes with the test integrated, rc 0, zero FAIL lines. One trap
+found on the way: the wrapper prints *during* the commit, so the verdict lands in the test's
+capture file and never on the process's own stderr — a first version that deleted that file
+silently destroyed the only artifact the checker consumes, so the test now prints the path.
+
+Measured and refused to paper over: the FAIL line's `after tx %llu` field prints
+`t_current_tx_id`, which `tm_hooks.cpp` increments only inside `trace_begin()` (`:344`, under
+`TM_TRACE_PATH`), so with an oracle and no tracing — the normal case — every report says
+`after tx 0`. The test asserts the prefix, not that field, and `TODO.md` records the
+misleading diagnostic rather than letting the fixture bless it.
+
+Gates: the 12-backend run above, `make fmt-check`, `make check-fast`. Docs: `TODO.md` (gap
+closed, new item opened), `docs/DEVELOPER_GUIDE.md` (`backend-unit` row names the test),
+`tools/stm_bug_tool/README.md` (the fixture now has a producer behind it).

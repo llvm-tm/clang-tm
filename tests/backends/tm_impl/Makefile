@@ -62,7 +62,7 @@ RUNTIME_mvlog := $(RUNTIME_DIR)/mvlog/MVLog_runtime.cpp
 FLAGS_mvlog := -DTM_BACKEND_MVLOG
 
 # ── Test source files ──────────────────────────────────────────────
-TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference abba_deadlock subword_counters gc_reader
+TESTS := counter_st counter_mt write_set_validation overlap_stress read_lock_interference readall_write_interference abba_deadlock subword_counters gc_reader invariant_callback
 
 # ── Standalone allocator tests (no backend runtime) ─────────────────
 ALLOC_TESTS := region_alloc region_stress

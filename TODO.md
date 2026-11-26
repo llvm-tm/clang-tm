@@ -377,13 +377,23 @@ What was left has one half done and three new gaps measured (P2, opened 2026-11-
   reachable only through the dead field. The regex is `^(?:TM-)?INVARIANT:` now, with an
   `oracle_callback_failure` fixture using the `fprintf`'s verbatim format string (measured on
   that line: 0 findings before the regex change, 1 `CRITICAL` after).
-- **No in-tree program registers an oracle callback, so that path is untested end to end.**
-  `tm_register_invariant_callback` is defined (`tm_hooks.cpp:842`) and documented
-  (`docs/fuzz-tool-plan.md:106`) and `tools/tm-fuzz/tm-fuzz.py:262` parses its output, but
-  nothing in `tests/` or `benchmarks/` calls it. A small `test_tx`-style case — register a
-  callback that fails a stated invariant on a bank, run it multi-threaded, check the tool
-  reports the `CRITICAL` — would exercise the hook wrapper (which rewrites the `tm_end`
-  function pointer, so it is worth covering for that reason alone) as well as the checker.
+- ~~**No in-tree program registers an oracle callback.**~~ → **covered same day.**
+  `tests/backends/tm_impl/test_invariant_callback.cpp` (in `TESTS`, so CI's `backend-unit`
+  job builds and runs it for all 12 backends) registers a money-conservation oracle over two
+  accounts and pins: the public `tm_end` hook is actually replaced; the oracle runs exactly
+  once per committed transaction (20 clean transfers → 20 calls); a clean run prints no FAIL
+  line; a transaction that creates money fires the oracle once and prints exactly one
+  `TM-INVARIANT: FAIL` to stderr. All 12 backends pass 7/7, and the captured stderr fed to
+  `invariant_checker.py` gives `1 critical`, exit 1 — the first time a program's own verdict
+  in this repo reaches the tool's verdict through a gate.
+- **The oracle FAIL line names a transaction that did not happen.** `tm_hooks.cpp:831` prints
+  `after tx %llu` from `t_current_tx_id`, but that counter is incremented only on the trace
+  path (`:344`, under `TM_TRACE_PATH`), so with an oracle registered and no tracing — the
+  normal case — every report says `after tx 0`. The prefix and the callback return code are
+  what both `tools/tm-fuzz/tm-fuzz.py:262` and `check_user_oracle` match, so nothing is
+  missed; it is a misleading diagnostic on the one line whose whole job is to point at a
+  transaction. Either advance a commit counter in the wrapper (it already runs per commit) or
+  print the oracle invocation count instead.
 - **Keep the checker's contract gated — `make check-pytools`.** Added with §41: eleven
   one-defect fixtures asserting exact count *and* severity, plus the CLI's five exit-code
   cases, run by CI's `lint` job. The checker is still not a gate on *backend* behaviour (the

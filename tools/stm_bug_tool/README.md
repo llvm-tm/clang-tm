@@ -144,6 +144,15 @@ findings at all, and at least one fixture must produce a `CRITICAL` — a suite 
 says "bad" is as useless as one that never says "good". `stale_read` pins §40's demotion
 specifically, so re-promoting `Version ordering` has to be an edit to that file.
 
+The two `oracle_*` fixtures mirror the two real producers of oracle verdicts in this tree,
+and one of them has a program behind it now:
+`tests/backends/tm_impl/test_invariant_callback.cpp` registers a money-conservation oracle
+through `tm_register_invariant_callback()` and emits the `TM-INVARIANT: FAIL` line itself.
+The test prints the file where that verdict landed (the wrapper writes during the commit, so
+it is not on the process's own stderr); feeding that file here gives `RESULT CRITICAL: 1
+critical`, exit 1 — a program's own verdict reaching the tool's verdict, which no test did
+before 2026-11-26.
+
 
 ## Usage
 
