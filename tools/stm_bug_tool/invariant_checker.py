@@ -3,12 +3,26 @@ invariant_checker.py — Static invariant definitions and checking
 for TM event traces.
 
 Each invariant is a function:
-    check(log: list, meta: dict) -> list[dict]
+    check(parsed: dict) -> list[dict]
 
-Returns list of violations, each:
+where `parsed` is the output of event_parser.parse_event_log(). Returns a
+list of violations, each:
     { "invariant": str, "severity": str,
       "description": str, "events": [matching events] }
+
+Run it from the command line over a dumped event log (see
+backends/tm_impl/common/tm_event_logger.hpp for the format and
+docs/DEBUGGING_BACKENDS.md §1 for how to produce one):
+
+    python3 tools/stm_bug_tool/invariant_checker.py --log /tmp/event_log.txt
+
+Exit status is 1 if any CRITICAL violation was found (2 with --strict when
+there are only warnings), 0 otherwise, so it can gate CI.
 """
+
+import argparse
+import re
+import sys
 
 from event_parser import (
     parse_event_log, group_by_thread, filter_by_type,
@@ -932,3 +946,106 @@ def check_all(parsed: dict, invariants: list = None) -> dict:
         "warnings": warnings,
         "severity": severity,
     }
+
+
+# ── Command line ──────────────────────────────────────────────────────
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(
+        description="Check static invariants over an STM event log dumped by "
+        "backends/tm_impl/common/tm_event_logger.hpp (TM_EVENT_LOG builds).",
+    )
+    ap.add_argument("--log", required=True, help="event-log file to check")
+    ap.add_argument(
+        "--baseline",
+        help="sequential-baseline file, '0xaddr 0xvalue' per line "
+        "(feeds the Sequential baseline invariant)",
+    )
+    ap.add_argument(
+        "--events",
+        help="comma-separated substrings of invariant names to run (default: all)",
+    )
+    ap.add_argument(
+        "--max-show", type=int, default=20, help="violations to print (default 20)"
+    )
+    ap.add_argument("--quiet", action="store_true", help="print only the summary line")
+    ap.add_argument(
+        "--strict", action="store_true", help="exit 2 on warnings as well as criticals"
+    )
+    args = ap.parse_args(argv)
+
+    with open(args.log) as f:
+        text = f.read()
+    parsed = parse_event_log(text)
+    if args.baseline:
+        parsed["baseline"] = load_baseline(args.baseline)
+
+    # The driver dumps one ring per worker, so a multi-threaded run concatenates
+    # several dumps. The lifecycle and lock-discipline checks pair events in one
+    # global stream, so interleaved concurrent threads pair them wrongly.
+    dumps = text.count("--- Event log (")
+
+    invariants = ALL_INVARIANTS
+    if args.events:
+        want = [s.strip().lower() for s in args.events.split(",") if s.strip()]
+        invariants = [(n, fn) for n, fn in ALL_INVARIANTS if any(w in n.lower() for w in want)]
+        if not invariants:
+            ap.error(
+                "--events matched nothing; available: "
+                + ", ".join(n for n, _ in ALL_INVARIANTS)
+            )
+
+    res = check_all(parsed, invariants)
+    per_inv = {}
+    for v in res["violations"]:
+        per_inv[v["invariant"]] = per_inv.get(v["invariant"], 0) + 1
+
+    wrapped = is_ring_wrapped(parsed) or any(
+        int(m.group(2)) > 0 for m in re.finditer(r"--- Event log \((\d+) entries, dumping from #(\d+)\) ---", text)
+    )
+    print(f"log: {args.log}")
+    print(
+        f"events: {len(parsed['events'])} parsed"
+        f" (last header claims {parsed.get('total_entries', '?')}),"
+        f" dumps: {dumps},"
+        f" threads: {len(group_by_thread(parsed['events']))},"
+        f" ring wrapped: {'yes (early history lost)' if wrapped else 'no'}"
+    )
+    if wrapped and not args.quiet:
+        print(
+            "note: the ring wrapped, so lifecycle checks only see the retained tail;"
+            "\n      a clean result here is weaker than on an unwrapped log."
+        )
+    if dumps > 1 and not args.quiet:
+        print(
+            f"note: {dumps} per-thread dumps are concatenated here. Complete TX"
+            "\n      lifecycle and Lock discipline pair events in one global stream,"
+            "\n      so dumps from CONCURRENTLY running threads interleave and those"
+            "\n      two checks report false violations. Use a single-threaded run"
+            "\n      (or fix the checks to pair per thread id)."
+        )
+
+    if not args.quiet:
+        for name, _ in invariants:
+            print(f"  {'FAIL' if per_inv.get(name) else 'ok  '} {name}: "
+                  f"{per_inv.get(name, 0)}")
+        for v in res["violations"][: args.max_show]:
+            print(f"[{v['severity']}] {v['invariant']}: {v['description']}")
+        if len(res["violations"]) > args.max_show:
+            print(f"... {len(res['violations']) - args.max_show} more")
+
+    print(
+        f"RESULT {res['severity']}: {res['critical']} critical,"
+        f" {res['warnings']} warnings ({len(invariants)} invariants)"
+    )
+
+    if res["critical"]:
+        return 1
+    if args.strict and res["warnings"]:
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

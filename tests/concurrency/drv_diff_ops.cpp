@@ -60,6 +60,7 @@
 #include <thread>
 #include <vector>
 
+#include "backends/tm_impl/common/tm_event_logger.hpp"
 #include "expli_tm_api/tm_api.hpp"
 
 extern __thread int tm_nested_call_counter;
@@ -551,6 +552,12 @@ int main(int argc, char **argv)
 		std::mt19937 rng(seed * 7919u + (unsigned)tid);
 		for (long o = 0; o < ops; o++)
 			tx_once(rng);
+		// Optional event-log dump for tools/stm_bug_tool/invariant_checker.py.
+		// TM_EVENT_DUMP expands to nothing unless the binary was built with
+		// -DTM_EVENT_LOG, so this costs nothing in a normal build; the ring is
+		// per thread, hence a dump here (one per worker) rather than at exit.
+		if (getenv("DRV_EVENT_DUMP"))
+			TM_EVENT_DUMP(4096);
 		expli::TM<int>::thread_exit();
 	};
 

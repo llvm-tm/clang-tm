@@ -62,7 +62,12 @@ ifeq ($(STATIC),1)
 else
   STATIC_FLAG :=
 endif
-CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC_FLAG) $(SANITIZE_FLAGS) $(COVERAGE_FLAGS) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp $(CXXFLAGS_GCC_FIX)
+# EXTRA_CXXFLAGS: user-extensible additions that do not replace the flags above
+# (overriding CXXFLAGS would drop the -I paths). Used, for example, to build the
+# event-logger instrumented driver for tools/stm_bug_tool:
+#   make -B -C benchmarks/cpp bin/drv_diff_ops BACKEND=TL2 EXTRA_CXXFLAGS=-DTM_EVENT_LOG
+EXTRA_CXXFLAGS ?=
+CXXFLAGS  = -std=c++20 -O3 $(MARCH) -pthread -DNDEBUG $(STATIC_FLAG) $(SANITIZE_FLAGS) $(COVERAGE_FLAGS) -I$(abspath ../..) -I$(abspath ../..)/explicit_api/cpp $(CXXFLAGS_GCC_FIX) $(EXTRA_CXXFLAGS)
 LDFLAGS   = $(STATIC_FLAG) -pthread $(SANITIZE_FLAGS) $(COVERAGE_FLAGS) $(CXXFLAGS_GCC_FIX)
 
 # --- Choose backend (default: TinySTM/WBCTL) --------------------

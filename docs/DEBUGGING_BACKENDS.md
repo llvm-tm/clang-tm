@@ -34,6 +34,18 @@ make -C tests/backends clean all CXXFLAGS="-DTM_EVENT_LOG -UNDEBUG"
 - **Manual dump:** call `TM_EVENT_DUMP(N)` (from `tm_event_logger.hpp`) in the
   thread whose events you want (e.g. at the end of a worker, or in the
   backend's `tm_exit_thread`). Each thread has its own ring — dump per thread.
+  `tests/concurrency/drv_diff_ops.cpp` does this under `DRV_EVENT_DUMP=1`, which
+  is how a *clean* run's trace reaches the invariant checker:
+
+  ```sh
+  make -B -C benchmarks/cpp bin/drv_diff_ops BACKEND=TL2 EXTRA_CXXFLAGS=-DTM_EVENT_LOG
+  DRV_EVENT_DUMP=1 ./benchmarks/cpp/bin/drv_diff_ops -S 1 -T 1 -n 300 2>/tmp/events.txt
+  python3 tools/stm_bug_tool/invariant_checker.py --log /tmp/events.txt   # exit 1 on CRITICAL
+  ```
+
+  Run it `-T 1` for now: the lifecycle and lock-discipline checks pair events in
+  one global stream, so interleaved concurrent dumps yield false positives (see
+  `tools/stm_bug_tool/README.md`).
 
 The logger records `addr1`/`addr2`/`data` per event, so you can confirm the
 exact addresses reaching the tracking path (and their versions).
