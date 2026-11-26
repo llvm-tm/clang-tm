@@ -267,12 +267,17 @@ Each item tags the affected area and priority (P0 = urgent, P1 = important, P2 =
 
    `.github/workflows/ci.yml`'s `tsan-gate` job now gates on all 18 clean
    backends; add ACCELTL2 when its row empties.
-- **CSMV commit path can reuse a published version node (latent)**:
-  `real_tm_end()` reuses `g_tx.writes[i].node` if it is non-null. Today the
-  write set is cleared at every `begin`, so the field is always null and the
-  path is dead — but if a retry path ever kept a write set, it would rewrite
-  the `timestamp`/`value`/`next` of a node already visible in the chain. Either
-  delete the branch or assert the node is unpublished before using it.
+- **RESOLVED 2026-11-26 — CSMV commit could reuse a published version node**:
+  `real_tm_end()` reused `g_tx.writes[i].node` when non-null, which would have
+  rewritten the `timestamp`/`value`/`next` of a node already visible in the
+  chain (a lockless chain walk could see a version jump backwards or skip one).
+  The branch was dead today — `begin_transaction()` clears the write set — so it
+  was a trap for any future retry path; commit now allocates unconditionally
+  (`csmv_cpu_runtime.cpp`). Verified: `test_tx` 120/120, `test_ds` 207/207,
+  `bank -t 8 -n 50000` conserves money in both plain and `CSMV_SERVER_COMMIT=1`
+  mode, driver `-T 8 -n 3000` seeds 1–3 and server mode with all counters 0, the
+  csmv unit suite is green, ThreadSanitizer stays at 0 races in both modes, and
+  `bank -t 8 -n 200000` holds at ~58 MB peak RSS (GC still reclaims).
 - **CSMV GC slot pinning if a thread dies mid-transaction**: a thread that
   leaves a slot registered (killed without `tm_exit_thread`, or a `longjmp`
   that never reaches `csmv_reg_end()`) pins the low-water mark until some later

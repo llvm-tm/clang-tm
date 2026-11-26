@@ -289,11 +289,19 @@ static void real_tm_end()
 		uint64_t val = g_tx.writes[i].val;
 		uint8_t bytes = g_tx.writes[i].bytes;
 
-		CSMVVersionNode *node = g_tx.writes[i].node;
-		if (!node) {
-			node = (CSMVVersionNode *)std::malloc(sizeof(CSMVVersionNode));
-			g_tx.writes[i].node = node;
-		}
+		// Always a fresh node.  The write set used to be reusable across
+		// attempts (g_tx.writes[i].node was kept and re-installed), and this
+		// branch quietly supported that: it would overwrite the
+		// timestamp/value/next of a node already published in the chain, so a
+		// reader walking it could see a version jump backwards or skip a
+		// version entirely.  Today begin_transaction() clears the write set, so
+		// the reuse never happens and the field is only ever written here --
+		// allocate unconditionally so the hazard cannot come back with a future
+		// retry path (a leaked node would be a bug; a re-published one is
+		// silent corruption).
+		CSMVVersionNode *node =
+		    (CSMVVersionNode *)std::malloc(sizeof(CSMVVersionNode));
+		g_tx.writes[i].node = node;
 		node->timestamp = commit_ts;
 		node->value = val;
 		set_link(node, old_head);
