@@ -65,6 +65,20 @@ def ev(etype, addr1="0x0", addr2="0x0", data=0) -> str:
     return f"{etype} addr1={addr1} addr2={addr2} data={data}"
 
 
+def logx(*rows) -> str:
+    """Interleave events from several threads: rows are (thread_id, event).
+
+    The driver dumps one ring per worker, so real logs are exactly this — several
+    threads' histories concatenated. Checks that pair or sequence events have to be
+    thread-aware (`docs/CORRECTNESS_FIXES.md` §38, §42), and these are the traces that
+    tell whether they are.
+    """
+    out = []
+    for i, (tid, line) in enumerate(rows, start=1):
+        out.append(f"[{i:>8}]  thr={tid} {line}")
+    return (HEADER % len(rows)) + "\n" + "\n".join(out) + "\n"
+
+
 # ── Fixtures ──────────────────────────────────────────────────────────
 # Each is: name -> (log text, expected findings, note).
 # `expected findings` maps invariant name -> (count, severity) and must match
@@ -143,6 +157,27 @@ FIXTURES = {
         log(BEGIN, READ, ev("WRITE_LOCK_ACQUIRE", DATA, "0x8"), ABORT),
         {},
         "an abort with its conflict evidence is not a finding",
+    ),
+    # §42: and the cause has to be on the *same* thread. In a merged per-worker dump
+    # thread B's conflict lands immediately before thread A's abort in file order, so a
+    # check that scans one global stream accepts another thread's event as the
+    # explanation — which is how 33 and 20 clean-run findings were reported for TL2
+    # after its own abort reasons were fixed.
+    "abort_cause_on_other_thread": (
+        logx(("0xa", BEGIN), ("0xa", READ), ("0xb", BEGIN),
+             ("0xb", ev("WRITE_LOCK_ACQUIRE", DATA, "0x8")), ("0xb", COMMIT),
+             ("0xa", ABORT)),
+        {"abort_causality": (1, "WARNING")},
+        "the only conflict evidence belongs to a different thread",
+    ),
+    # The mirror: interleaving alone must not make a properly explained abort look
+    # unexplained.
+    "abort_cause_same_thread_interleaved": (
+        logx(("0xa", BEGIN), ("0xb", BEGIN), ("0xa", READ),
+             ("0xa", ev("WRITE_LOCK_ACQUIRE", DATA, "0x8")), ("0xb", READ),
+             ("0xb", COMMIT), ("0xa", ABORT)),
+        {},
+        "interleaving is not the same as a missing cause",
     ),
     # Freeing memory nothing allocated.
     "orphan_free": (

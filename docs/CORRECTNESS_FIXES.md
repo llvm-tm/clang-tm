@@ -1824,6 +1824,72 @@ directions: the `clean` fixture must report *nothing*, and at least one fixture 
 produce a `CRITICAL`. The `User oracle` fixture is the one that fails against the
 pre-fix code.
 
+## 42. TL2's two commit-path abort routes named no reason, and the reason check scanned the wrong thread (2026-11-26) ✅
+
+**Root cause, half 1 — the backend.** `TL2::commit()` has two conflict routes that end
+the transaction and neither said why:
+
+- guard acquisition fails (another transaction holds the guard for a write-set address);
+- Step 5's read-set validation finds a guard locked by someone else, or carrying a
+  version other than the one the read observed.
+
+Both logged a bare `TX_ABORT` (added in §38, which fixed the *lifecycle* half). Measured
+on `-S 2 -T 4 -n 1000` and `-S 3 -T 4 -n 1000`: **124 of 125** and **46 of 46** aborts had
+no preceding event from the causal vocabulary, and the logs contained **0**
+`READ_VERSION_CHECK` and **0** `WRITE_LOCK_ACQUIRE` events — a trace in which a read-set
+conflict, a guard conflict and an in-body abort are literally the same thing.
+
+**Fix** (`backends/tm_impl/tl2/tl2.hpp`, instrumentation only, compiled out without
+`-DTM_EVENT_LOG`): log `WRITE_LOCK_ACQUIRE` at the failed acquisition with the guard word
+that was found (odd = held by another transaction), and `READ_VERSION_CHECK` at the failed
+validation with the address and the version that invalidated it — its counterpart
+`READ_LOCK_ACQUIRE` already logged the version that was *observed*, so the pair now states
+the conflict. Payloads follow TinySTM's convention (`addr1` = data address, `addr2` = the
+guard/lock, `data` = version/lock word; `tinystm_wbctl.hpp:591`, `:782`).
+
+**Root cause, half 2 — the checker.** `check_abort_causality` used `extract_tx_ranges()`,
+which walks one global event stream. The driver dumps a ring per worker, so in a merged
+log thread A's `TX_BEGIN` pairs with thread B's `TX_ABORT`, and a causal event that really
+did precede the abort can fall outside the window — the same defect §38 fixed in the two
+pairing checks. It now scans per thread id, and skips an abort whose `TX_BEGIN` is not in
+the retained window (the wrapped-ring leniency the other checks already apply).
+
+**Verification — the two halves are separable, which is why both are claimed.** Same logs,
+checker as of §41 vs. as of this commit:
+
+| backend | findings, global ranges | findings, per thread |
+|---|---|---|
+| HEAD (routes silent) | 122 (`-S 2`), 45 (`-S 3`) | 124, 46 |
+| routes log their reason | 33, 20 | **0, 0** |
+
+Read the rows separately: fixing the checker alone changes nothing (122 → 124 — the
+thread-blind scan was *under*-counting, it was not the source of the noise). Fixing the
+backend leaves the checker complaining about 33 and 20 aborts that, scanned per thread, all
+have their cause in the log: 0 of 259 and 0 of 282 aborts lack one. Both rows were needed
+for the number to reach zero.
+
+For completeness, the §41 fixture suite's quoted real-log baselines move with it: the
+three logs go from 0 critical / 1 416, 2 119 and 352 warnings to 0 critical / 1 422, 2 128
+and 386 — every extra finding is `abort_causality` on a backend that still aborts without
+saying so, and the broken fixture still yields exactly 3 criticals.
+
+Two more things the change does *not* get to claim. `aborts=` is not evidence of anything
+here: at a fixed seed on an event-log build the same binary reports 171 / 156 / 108 / 0
+aborts across four repeats (`-S 1 -T 4 -n 200`) and 2 871 / 2 877 / 2 869 / 3 447
+(`-S 2 -T 4 -n 1000`), with `commits=` pinned at 1 144 and 4 344 — only the abort/success
+split moves. And to close the question that difference raises: a normal build (no
+`-DTM_EVENT_LOG`) at HEAD and at this commit are **byte-identical**
+(`cmp` clean, same SHA-256 `de5aaccdd820efb6…`), because the `TM_EVENT2` arguments are
+inside a macro that expands to `((void)0)` — so nothing outside event-log builds can be
+affected, and no claim is made about behaviour inside them.
+
+**What is still silent.** The `TM_ACCEL_GPU` pre-validation route (`tl2.hpp:765`) aborts on
+a device verdict that names no address, so logging `READ_VERSION_CHECK` there would put a
+guessed `addr1` in the trace — the §39 mistake. Recorded in `TODO.md`: the device has to
+report the offending read-set index first. `docs/CORRECTNESS_FIXES.md` §41's fixture suite
+grew two cases for the checker half (`abort_cause_on_other_thread`, and the mirror
+`abort_cause_same_thread_interleaved`), so a future refactor back to a global scan fails CI.
+
 ## Known remaining issues (not yet fixed)
 
 | Issue | Severity | Notes |

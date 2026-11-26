@@ -792,6 +792,19 @@ public:
 						held_guard[idx2] = false;
 					}
 				}
+				// The reason, before the abort: someone else held this guard.  A
+				// TX_ABORT with nothing before it is indistinguishable in the trace
+				// from an abort for any other reason, so log the contended
+				// acquisition here — addr1 is the data address, addr2 the guard, and
+				// data the guard word we found (odd = held by another transaction).
+				// Note the convention difference: in TL2 a *successful* commit-path
+				// acquisition is logged as COMMIT_LOCK_ACQUIRE below, so this event
+				// marks the attempt that failed.  TinySTM logs its successful
+				// WRITE_LOCK_ACQUIRE the same way (tinystm_wbctl.hpp:782).
+				TM_EVENT2(WRITE_LOCK_ACQUIRE,
+				          (word_t)e.addr,
+				          (word_t)&g_guards[idx],
+				          g_guards[idx].load(std::memory_order_relaxed));
 				// Log the abort: TX_BEGIN has no other end on this route.  Without
 				// it, tools/stm_bug_tool/invariant_checker.py's lifecycle check sees
 				// a TX_BEGIN that never completes and reports a lost transaction
@@ -830,6 +843,19 @@ public:
 			// (guard was released with a newer version after our read).
 			if ((current_guard & LOCK_MASK && !our_lock) ||
 			    current_version != re.observed_version) {
+				// Which read broke, and what its guard says now.  The reader's own
+				// READ_LOCK_ACQUIRE logged the version it observed in `data`, so this
+				// event's `data` completes the pair: addr1 is the data address, addr2
+				// the guard, and the version found here is the one that invalidated
+				// the transaction (or the guard is locked, which this logs as the
+				// value seen).  Same payload convention as TinySTM's version checks
+				// (tinystm_wbctl.hpp:591).  Without it, 122 of 125 TL2 aborts in one
+				// -T 4 run were bare TX_ABORT events, and the trace could not tell a
+				// read-set conflict from a guard conflict or from an in-body abort.
+				TM_EVENT2(READ_VERSION_CHECK,
+				          (word_t)re.data_addr,
+				          (word_t)re.guard_addr,
+				          current_version);
 				for (auto &e : tx->write_set) {
 					word_t idx = get_guard_idx(e.addr);
 					if (held_guard[idx]) {

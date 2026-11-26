@@ -169,32 +169,50 @@ def check_lock_discipline(parsed: dict) -> list:
 ABORT_CAUSAL_EVENTS = {"READ_VERSION_CHECK", "GAP_CHECK", "WRITE_LOCK_ACQUIRE"}
 
 def check_abort_causality(parsed: dict) -> list:
-    """Each TX_ABORT should be preceded by a causal event.
+    """Each TX_ABORT should be preceded, on the same thread, by a causal event.
 
-    Checks that there is at least one READ_VERSION_CHECK, GAP_CHECK,
-    or WRITE_LOCK_ACQUIRE event between TX_BEGIN and TX_ABORT.
+    Scanned per thread id like the two pairing checks (§38), for the same reason:
+    `extract_tx_ranges()` walks one global stream, and the driver dumps one ring per
+    worker, so in a merged log thread A's TX_BEGIN pairs with thread B's TX_ABORT and
+    the event that really explained the abort falls outside the window. Measured on a
+    TL2 `-T 4` run after its commit-path aborts started logging their reason (§42):
+    0 of 259 and 0 of 282 aborts lack a cause when scanned per thread, against 33 and
+    20 reported by the global-range version of this check on the same files.
+
+    An abort whose TX_BEGIN is not in the retained window is not checked: on a wrapped
+    ring the causal event may be in the overwritten portion, which is the same leniency
+    the lifecycle and lock-discipline checks apply.
     """
     violations = []
-    events = parsed["events"]
-    tx_ranges = extract_tx_ranges(events)
 
-    for start, end, end_type in tx_ranges:
-        if end_type != "TX_ABORT":
-            continue
+    for tid, thread_events in group_by_thread(parsed["events"]).items():
+        in_tx = False
+        begin_ev = None
+        cause = None
+        recent = []
 
-        tx_events = events[start:end + 1]
-        has_cause = any(
-            ev["type"] in ABORT_CAUSAL_EVENTS for ev in tx_events
-        )
-
-        if not has_cause:
-            violations.append({
-                "invariant": "abort_causality",
-                "severity": "WARNING",
-                "description": f"TX_ABORT at event #{end} has no preceding causal event "
-                               f"(no version_check, gap_check, or lock_acquire failure)",
-                "events": tx_events[-3:],  # last 3 events before abort
-            })
+        for ev in thread_events:
+            etype = ev["type"]
+            if etype == "TX_BEGIN":
+                in_tx, begin_ev, cause = True, ev, None
+                recent = [ev]
+            elif etype in ("COMMIT_SUCCESS", "TX_ABORT"):
+                if etype == "TX_ABORT" and in_tx and cause is None:
+                    violations.append({
+                        "invariant": "abort_causality",
+                        "severity": "WARNING",
+                        "description": f"TX_ABORT on thread {tid} (TX_BEGIN "
+                                       f"#{begin_ev['timestamp']}) has no preceding "
+                                       f"causal event (no version check, gap check, or "
+                                       f"write-lock conflict since it began)",
+                        "events": recent[-3:],
+                    })
+                in_tx, cause = False, None
+                recent = []
+            else:
+                if in_tx and cause is None and etype in ABORT_CAUSAL_EVENTS:
+                    cause = ev
+                recent.append(ev)
 
     return violations
 

@@ -27,7 +27,7 @@ severity each violation is reported at:
 |-----------|------------------|
 | Complete TX lifecycle | Per thread id: every `TX_BEGIN` ends in `COMMIT_SUCCESS` or `TX_ABORT`; an end without a begin is CRITICAL |
 | Lock discipline | Per thread id: every `COMMIT_LOCK_ACQUIRE` has a matching `LOCK_RELEASE` from the same thread |
-| Abort causality | A `TX_ABORT` is preceded by a causal event (version/gap/lock failure) — WARNING: backends abort for reasons not all logged |
+| Abort causality | Per thread id: a `TX_ABORT` is preceded, on the same thread, by a causal event (`READ_VERSION_CHECK`, `GAP_CHECK`, `WRITE_LOCK_ACQUIRE`) — WARNING: backends still abort for reasons not all logged (TL2's two commit routes now log theirs, `docs/CORRECTNESS_FIXES.md` §42) |
 | No orphan locks | Locks held at the end of the log (or at a `SIGSEGV`) without release |
 | Gap check outcome | Every `GAP_CHECK` is followed by `TX_ABORT` or a matching success path |
 | Version ordering | Within a thread, read-set versions are ≤ the transaction's start version — a `WARNING`: it encodes the versioned-lock discipline, and value-validated backends (NOrec, NORECBF, TL2) break it by design (`docs/CORRECTNESS_FIXES.md` §40) |
@@ -110,15 +110,22 @@ NOrec advances `tx->snapshot` only through a `validate()` that re-reads and valu
 the entire read set first, so its newer-version reads are safe by construction — measured
 in §40, where the value-check abort count equalled the driver's `aborts=` in every shape
 and all four consistency oracles stayed at 0. That check is now a `WARNING`. All three
-real logs measured afterwards are `0 critical` (NOrec 1 416 warnings, NORECBF 2 119, the
-§38 TL2 log 352) while the deliberately-broken fixture still reports 3, so the `CRITICAL`
-class stays meaningful and `--strict` still distinguishes clean from not.
+real logs measured afterwards are `0 critical` (NOrec 1 422 warnings, NORECBF 2 128, the
+§38 TL2 log 386 — §42's stricter `abort_causality` scan moved those totals up from
+1 416 / 2 119 / 352, the critical counts unchanged) while the deliberately-broken fixture
+still reports 3, so the `CRITICAL` class stays meaningful and `--strict` still distinguishes
+clean from not.
 
-Still open, measured and listed in `TODO.md`: `Abort causality` fires (96, 316 and 263
-times on clean TL2 runs at three shapes; 41 and 84 on the two NOrec logs) because its
-causal event set does not include the conflict evidence these backends log, and
-`Version ordering` is soft rather than backend-aware. So the checker remains a diagnostic
-tool, not a gate on backend behaviour.
+What `abort_causality` still means: TL2's two commit-path conflict routes were logging a
+bare `TX_ABORT`, and the check itself paired one global event stream so it credited another
+thread's conflict as the explanation — both fixed in `docs/CORRECTNESS_FIXES.md` §42, which
+measures the pair (a TL2 run whose 259 and 282 aborts all carry their own reason now reports
+**0**, where the old backend plus the old check reported 122 and 45). The scan is stricter
+than it was, so counts went *up* on logs from backends that still abort silently: NOrec 41 →
+47, NORECBF 84 → 93, the §38 TL2 log 316 → 350. Those are real gaps in those backends'
+traces, listed in `TODO.md`, along with the `Version ordering` work needed to make it
+backend-aware rather than merely a warning. So the checker remains a diagnostic tool, not a
+gate on backend behaviour.
 
 ## Testing the checker itself
 

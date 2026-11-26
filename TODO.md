@@ -381,14 +381,32 @@ What was left has one half done and three new gaps measured (P2, opened 2026-11-
   three bullets below), which is exactly why its own verdicts needed pinning: nothing in the
   tree would have noticed if a check had gone silent. When you settle one of those bullets,
   the fixture that pins its current severity changes in the same commit.
-- **`Abort causality` does not know TL2's vocabulary.** Now that aborts are logged it
-  fires on clean TL2 runs: 96 warnings at `-S 1 -T 4 -n 200`, 316 at
-  `-S 2 -T 4 -n 1000` and 263 at `-S 3 -T 4 -n 1000`, because `ABORT_CAUSAL_EVENTS` is
-  `{READ_VERSION_CHECK, GAP_CHECK, WRITE_LOCK_ACQUIRE}` and TL2's conflict evidence is
-  a failed `COMMIT_LOCK_ACQUIRE` (which logs nothing on failure) or a read-set version
-  mismatch (also silent). Either TL2 logs the conflict reason at those two sites, or
-  the check learns that the set is per-backend. Do not just widen the set: on the
-  backends it was written for, it is a real check.
+- ~~**`Abort causality` does not know TL2's vocabulary.**~~ → **resolved same day (§42),
+  and the cause was not the one guessed.** TL2's two commit-path conflict routes logged a
+  bare `TX_ABORT` — 124 of 125 and 46 of 46 aborts with nothing before them, and 0
+  `READ_VERSION_CHECK` / 0 `WRITE_LOCK_ACQUIRE` events in the whole log. They now log the
+  contended guard (with the guard word found) and the invalidated read-set entry (with the
+  version that broke it), on TinySTM's payload convention. The 2×2 against the old checker
+  is what makes both halves provable: HEAD + old check 122 / 45 findings, HEAD + per-thread
+  check 124 / 46 (so the checker fix alone fixes nothing — the thread-blind global scan was
+  *under*-counting), fixed backend + per-thread check **0 / 0** (0 of 259 and 0 of 282
+  aborts lack a cause). Fixed backend + old check still says 33 / 20, which is the
+  thread-blindness showing up only once the causes exist.
+- **Backends that still abort without naming a reason.** With the check scanning per thread
+  it no longer credits another thread's conflict, so the honest counts went up: NOrec 41 →
+  47 and NORECBF 84 → 93 on the `-S 3 -T 4 -n 300` logs, and 316 → 350 on the §38 TL2 log
+  (that one is the pre-§42 binary, so it is expected to be the same shape as §42's fixed
+  run — re-dump it after this lands and confirm it reaches 0). Start from
+  `NOrec.hpp`'s `abort_tx()` (`:220`) and `NOrec_BF.hpp`'s (`:268`): the read path's
+  locked-clock retry and the validation loop's `!iseq` abort (`NOrec.hpp:246-250`) are both
+  conflicts and both log nothing, even though NOrec is exactly the backend whose
+  `READ_VERSION_CHECK` equivalent — the value re-read — §40 showed to be load-bearing.
+- **ACCELTL2's device pre-validation aborts with no reason in the trace.** `tl2.hpp:765`,
+  compiled only under `TM_ACCEL_GPU`: `accel::prevalidate()` returns a verdict for the whole
+  read set and names no address, so logging `READ_VERSION_CHECK` there would mean inventing
+  an `addr1` — the §39 mistake, deliberately not repeated. The device kernel has to report
+  the offending read-set index first (`workloads`/`explicit_api` accel side), then this route
+  logs it like the two CPU routes did in §42.
 - **`Version ordering` calls TL2's normal behaviour a stale read.** 14–41
   `CRITICAL`s per clean TL2 log, pre-existing (§38's table shows it on both sources):
   the check flags `READ_LOCK_ACQUIRE` version > `TX_BEGIN` start version, but TL2

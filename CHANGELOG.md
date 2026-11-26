@@ -3919,3 +3919,49 @@ Docs: `tools/stm_bug_tool/README.md` (invariant table, a "Testing the checker it
 section), `docs/DEVELOPER_GUIDE.md` (target list + `lint` row), `docs/DEBUGGING_BACKENDS.md`,
 `TODO.md` (§40 cleared; the backend-aware `version_ordering` and `abort_causality` items
 stay open), §40 and §41 in `docs/CORRECTNESS_FIXES.md`.
+
+## Session 2026-11-26 (morning, sixth block) — TL2 names its abort reasons; the reason check learns about threads (§42)
+
+Took the open `abort_causality` item and it turned out to be two defects, which had to be
+measured apart before either could be claimed. **Backend half:** `TL2::commit()`'s two
+conflict routes — the guard-acquisition failure and Step 5's read-set validation — ended the
+transaction with a bare `TX_ABORT`: on `-S 2 -T 4 -n 1000` and `-S 3 -T 4 -n 1000`,
+**124 of 125** and **46 of 46** aborts had no preceding causal event, and the logs held **0**
+`READ_VERSION_CHECK` and **0** `WRITE_LOCK_ACQUIRE` events, so a read-set conflict, a guard
+conflict and an in-body abort were the same thing in the trace. They now log the contended
+guard (with the guard word found — odd means someone else holds it) and the invalidated
+read-set entry (with the version that broke it, pairing with the `READ_LOCK_ACQUIRE` that
+logged the observed version), on TinySTM's payload convention. **Checker half:**
+`check_abort_causality` walked `extract_tx_ranges()` over one global stream — the same defect
+§38 fixed in the pairing checks — so in a merged per-worker dump thread A's `TX_BEGIN` paired
+with thread B's `TX_ABORT`, and a causal event that really preceded the abort could fall
+outside the window. It scans per thread id now, skipping aborts whose `TX_BEGIN` was
+overwritten.
+
+The separable evidence: HEAD + old check **122 / 45** findings, HEAD + per-thread check
+**124 / 46** (so the checker fix alone fixes nothing — the thread-blind scan was *under*-
+counting by crediting another thread's conflict), fixed backend + per-thread check
+**0 / 0** (0 of 259 and 0 of 282 aborts lack a cause), fixed backend + old check still 33 /
+20. Because the scan got stricter rather than softer, honest counts went *up* on logs from
+backends that still abort silently — NOrec 41 → 47, NORECBF 84 → 93, the §38 TL2 log
+316 → 350 — and those went into `TODO.md` as real gaps rather than being smoothed over. All
+critical counts unchanged (0, 0, 0; broken fixture still 3).
+
+Refused two temptations. `aborts=` looked like it moved (0 → 116 between two runs of one
+shape), so it was measured: the *same* binary at a fixed seed gives 171 / 156 / 108 / 0 at
+`-S 1 -T 4 -n 200` and 2 871 / 2 877 / 2 869 / 3 447 at `-S 2 -T 4 -n 1000`, with `commits=`
+pinned at 1 144 and 4 344 — the abort/success split is noise and no claim rests on it. And to
+settle whether instrumentation could have moved anything at all: a normal build at HEAD and at
+this commit are **byte-identical** (`cmp` clean, same SHA-256), the `TM_EVENT2` arguments
+sitting inside a macro that expands to `((void)0)`. ACCELTL2's `TM_ACCEL_GPU` pre-validation
+route is left logging no reason on purpose — the device verdict names no address, and putting
+a guessed `addr1` in the trace is the §39 mistake; `TODO.md` has what the kernel must return
+first, together with NOrec's own two silent conflict sites.
+
+Two fixtures added for the checker half (`abort_cause_on_other_thread` and its mirror), so a
+refactor back to a global scan fails CI: 13 fixtures + 5 exit-code cases, all passing.
+Gates: `test_tx` 120/120, `test_ds` 207/207, `bank -t 8` conserving, `run-tl2` PASS,
+`BACKENDS=TL2 tools/diff_backends.sh 1 2` on the 7-scenario set, `make check-pytools`,
+`make fmt-check`, `make check-fast`. Docs: §42 in `docs/CORRECTNESS_FIXES.md`, checker
+README (invariant table, the `abort_causality` paragraph, refreshed baselines), `TODO.md`,
+`docs/DEVELOPER_GUIDE.md` untouched (no CI change).
